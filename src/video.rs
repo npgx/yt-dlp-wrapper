@@ -1,29 +1,4 @@
-use crate::BoxBodyBytes;
-use flexbuffers::{DeserializationError, FlexbufferSerializer};
-use http_body_util::{BodyExt, Empty};
-use hyper::Response;
-use serde::{Deserialize, Serialize};
-use std::net::SocketAddr;
-use tokio::sync::mpsc::Sender;
 use url::Url;
-
-pub(crate) async fn handle_video_http_request(
-    request: hyper::Request<hyper::body::Incoming>,
-    addr: SocketAddr,
-    tx: Sender<VideoRequest>,
-) -> Result<hyper::Response<BoxBodyBytes>, hyper::http::Error> {
-    let vreq = VideoRequest::from_request(request, addr)
-        .await
-        .expect("Could not retrieve VideoRequest from HTTP request");
-
-    tx.send(vreq)
-        .await
-        .expect("Could not enqueue video request into mpsc channel");
-
-    Ok(Response::new(Box::new(
-        Empty::new().map_err(|err| Box::new(err) as _),
-    )))
-}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub(crate) struct VideoRequest {
@@ -71,26 +46,5 @@ impl VideoRequest {
             };
 
         Ok(Self { youtube_id: id })
-    }
-
-    pub async fn from_request(
-        req: hyper::Request<hyper::body::Incoming>,
-        addr: SocketAddr,
-    ) -> Result<VideoRequest, DeserializationError> {
-        let body_bytes = req.collect().await.unwrap().to_bytes();
-        let s = flexbuffers::Reader::get_root(body_bytes.as_ref())?;
-        VideoRequest::deserialize(s)
-    }
-
-    pub fn into_bytes(self) -> hyper::body::Bytes {
-        let mut s = FlexbufferSerializer::new();
-        self.serialize(&mut s).unwrap();
-        hyper::body::Bytes::from(Vec::from(s.view()))
-    }
-}
-
-impl Into<BoxBodyBytes> for VideoRequest {
-    fn into(self) -> BoxBodyBytes {
-        Box::new(http_body_util::Full::from(self.into_bytes()).map_err(|err| Box::new(err) as _))
     }
 }

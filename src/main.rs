@@ -7,15 +7,6 @@ pub(crate) mod tools;
 
 use clap::Parser;
 
-pub(crate) type BoxBodyBytes = Box<
-    dyn hyper::body::Body<
-            Data = hyper::body::Bytes,
-            Error = Box<dyn std::error::Error + Send + Sync>,
-        > + Send
-        + Sync
-        + Unpin,
->;
-
 #[macro_export]
 macro_rules! verbose {
     ($($arg:tt)*) => {

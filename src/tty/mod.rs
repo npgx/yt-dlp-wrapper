@@ -211,7 +211,7 @@ async fn handle_video_request(
     ytdlp_cmd.push(request.youtube_id);
     match pretty_ask_execute(ytdlp_cmd, &work_dir).await? {
         PrettyAskCommandStatus::CorrectlyExecuted => {}
-        PrettyAskCommandStatus::ExecutedWithNonZeroExit(code) => {}
+        PrettyAskCommandStatus::ExecutedWithNonZeroExit(_code) => {}
         PrettyAskCommandStatus::UserCancelled => {}
     }
 
@@ -219,7 +219,7 @@ async fn handle_video_request(
     beet_cmd.push(String::from("."));
     match pretty_ask_execute(beet_cmd, &work_dir).await? {
         PrettyAskCommandStatus::CorrectlyExecuted => {}
-        PrettyAskCommandStatus::ExecutedWithNonZeroExit(code) => {}
+        PrettyAskCommandStatus::ExecutedWithNonZeroExit(_code) => {}
         PrettyAskCommandStatus::UserCancelled => {}
     }
 
