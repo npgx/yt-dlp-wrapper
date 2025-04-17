@@ -2,7 +2,6 @@ use crate::lock;
 use crate::video::VideoRequest;
 use axum::routing::post;
 use dialoguer::Confirm;
-use serde::Deserialize;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -185,10 +184,8 @@ pub(crate) async fn run(args: TtyArgs) {
 
 async fn post_video_request(
     axum::extract::State(state): axum::extract::State<TtyState>,
-    vreq: axum::body::Bytes,
+    axum::Form(vreq): axum::Form<VideoRequest>,
 ) -> Result<(), String> {
-    let vreq = flexbuffers::Reader::get_root(vreq.as_ref()).map_err(|err| format!("{err:?}"))?;
-    let vreq = VideoRequest::deserialize(vreq).map_err(|err| format!("{err:?}"))?;
     state
         .vreq_sender
         .send(vreq)

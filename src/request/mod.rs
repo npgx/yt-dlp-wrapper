@@ -27,8 +27,8 @@ pub(crate) async fn run(args: RequestArgs) {
     let yt_id = video_request.youtube_id.clone();
 
     let response = client
-        .post(format!("http://127.0.0.1:{}", port))
-        .body(video_request.into_bytes())
+        .post(format!("http://127.0.0.1:{}/video-request", port))
+        .form(&video_request)
         .send()
         .await
         .expect("Failed to send http request to daemon!");
