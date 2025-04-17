@@ -1,48 +1,58 @@
 use crate::lock;
 use crate::video::VideoRequest;
+use axum::routing::post;
 use dialoguer::Confirm;
+use serde::Deserialize;
 use std::error::Error;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::process::ExitStatus;
 
-//mod instance;
-mod server;
-
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct TtyArgs {
-    #[arg(long, visible_alias("yt-dlp-command"), value_parser = YtDlpCommand::from_raw, help = "yt-dlp command to execute. NOTE: '--' will automatically be appended to this.")]
-    pub yt_dlp: YtDlpCommand,
+    #[arg(long, visible_alias("yt-dlp-command"), value_parser = parse_yt_dlp, help = "yt-dlp command to execute. NOTE: '--' will automatically be appended to this. NOTE: each command chain will execute in a different temporary directory.")]
+    pub yt_dlp: PosixCommand,
+    #[arg(long, visible_alias("beet-command"), value_parser = parse_beet, default_value = "beet import -m", help = "beet command to execute. Defaults to 'beet import -m'. '.' will be appended to the command, and the execution directory will be set as the yt-dlp download directory.")]
+    pub beet: PosixCommand,
+}
+
+fn parse_yt_dlp(raw: &str) -> Result<PosixCommand, DaemonError> {
+    PosixCommand::from_raw(raw).ok_or_else(|| DaemonError::YtDlpCommand {
+        erroneous_command: raw.to_string(),
+    })
+}
+
+fn parse_beet(raw: &str) -> Result<PosixCommand, DaemonError> {
+    PosixCommand::from_raw(raw).ok_or_else(|| DaemonError::BeetCommand {
+        erroneous_command: raw.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum DaemonError {
     #[error("The provided yt-dlp command is malformed")]
     YtDlpCommand { erroneous_command: String },
+    #[error("The provided beet command is malformed")]
+    BeetCommand { erroneous_command: String },
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct YtDlpCommand {
-    pub(crate) args: Vec<String>,
+pub(crate) struct PosixCommand {
+    pub(crate) components: Vec<String>,
 }
 
-impl YtDlpCommand {
-    fn from(args: Vec<String>) -> Self {
-        Self { args }
+impl PosixCommand {
+    fn new(args: Vec<String>) -> Self {
+        Self { components: args }
     }
 
-    pub(crate) fn from_raw(raw: &str) -> Result<Self, DaemonError> {
-        match shlex::split(raw) {
-            None => Err(DaemonError::YtDlpCommand {
-                erroneous_command: raw.to_string(),
-            }),
-            Some(values) => Ok(Self::from(values)),
-        }
+    pub(crate) fn from_raw(raw: &str) -> Option<Self> {
+        shlex::split(raw).map(|split| Self::new(split))
     }
 }
 
-impl Display for YtDlpCommand {
+impl Display for PosixCommand {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self)
     }
@@ -125,6 +135,11 @@ impl Drop for InOut {
 /*pub(crate) static INOUT: once_cell::sync::Lazy<tokio::sync::Mutex<Option<InOut>>> =
 once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(None));*/
 
+#[derive(Clone)]
+pub(crate) struct TtyState {
+    pub vreq_sender: tokio::sync::mpsc::Sender<VideoRequest>,
+}
+
 pub(crate) async fn run(args: TtyArgs) {
     /* *INOUT.lock().await = Some(InOut::std().await);*/
 
@@ -151,18 +166,35 @@ pub(crate) async fn run(args: TtyArgs) {
     // using a mpsc queue lets us asynchronously add to the queue but handle the requests one at a time in the terminal
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
 
-    let tcp_join = tokio::spawn(server::handle_tcp_connections(tcpl, tx));
+    let app = axum::Router::new()
+        .route("/video-request", post(post_video_request))
+        .with_state(TtyState { vreq_sender: tx });
 
     println!("Daemon is running! Listening on 127.0.0.1:{}", port);
-    println!("Will execute command {:?}", args.yt_dlp.args);
 
-    while let Some(vreq) = rx.recv().await {
-        handle_video_request(vreq, &args)
-            .await
-            .expect("Failed to handle video request!");
-    }
+    tokio::spawn(async move {
+        while let Some(vreq) = rx.recv().await {
+            handle_video_request(vreq, &args)
+                .await
+                .expect("Failed to handle video request!");
+        }
+    });
 
-    tcp_join.await.expect("Failed to join TCP listener!");
+    axum::serve(tcpl, app).await.unwrap();
+}
+
+async fn post_video_request(
+    axum::extract::State(state): axum::extract::State<TtyState>,
+    vreq: axum::body::Bytes,
+) -> Result<(), String> {
+    let vreq = flexbuffers::Reader::get_root(vreq.as_ref()).map_err(|err| format!("{err:?}"))?;
+    let vreq = VideoRequest::deserialize(vreq).map_err(|err| format!("{err:?}"))?;
+    state
+        .vreq_sender
+        .send(vreq)
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+    Ok(())
 }
 
 type DidRun = bool;
@@ -171,26 +203,32 @@ async fn handle_video_request(
     args: &TtyArgs,
 ) -> Result<DidRun, Box<dyn Error + Send + Sync>> {
     println!("Received request for {}", request.youtube_id);
-    let mut ytdlp_cmd = args.yt_dlp.args.clone();
-    ytdlp_cmd.push(String::from("--"));
-    ytdlp_cmd.push(request.youtube_id);
 
     // ONLY pass this directory to pretty_ask_execute behind a reference, otherwise, the command execution will fail
     // because work_dir will get dropped in the coercion from TempDir to Path (impl AsRef<Path>), which will delete the directory
     // and print the error: Os { code: 2, kind: NotFound, message: "No such file or directory" }
     let work_dir = tempfile::tempdir()?;
 
+    let mut ytdlp_cmd = args.yt_dlp.components.clone();
+    ytdlp_cmd.push(String::from("--"));
+    ytdlp_cmd.push(request.youtube_id);
     match pretty_ask_execute(ytdlp_cmd, &work_dir).await? {
-        Some(code) if !code.success() => {
-            // non-0 exit code
-            // TODO: ask if user would like to completely cancel this chain of commands
-        }
-        _ => {}
+        PrettyAskCommandStatus::CorrectlyExecuted => {}
+        PrettyAskCommandStatus::ExecutedWithNonZeroExit(code) => {}
+        PrettyAskCommandStatus::UserCancelled => {}
+    }
+
+    let mut beet_cmd = args.beet.components.clone();
+    beet_cmd.push(String::from("."));
+    match pretty_ask_execute(beet_cmd, &work_dir).await? {
+        PrettyAskCommandStatus::CorrectlyExecuted => {}
+        PrettyAskCommandStatus::ExecutedWithNonZeroExit(code) => {}
+        PrettyAskCommandStatus::UserCancelled => {}
     }
 
     let do_persist_tempdir = Confirm::new()
         .with_prompt(format!(
-            "Would you like to persist the directory '{}'",
+            "Would you like to persist the temp directory '{}'?",
             work_dir.path().display()
         ))
         .default(false)
@@ -227,10 +265,16 @@ fn print_return_daemon_context(return_code: Option<i32>) {
     println!();
 }
 
+enum PrettyAskCommandStatus {
+    CorrectlyExecuted,
+    ExecutedWithNonZeroExit(ExitStatus),
+    UserCancelled,
+}
+
 async fn pretty_ask_execute(
     full_command: Vec<String>,
     work_dir: impl AsRef<Path>,
-) -> Result<Option<ExitStatus>, Box<dyn Error + Send + Sync>> {
+) -> Result<PrettyAskCommandStatus, Box<dyn Error + Send + Sync>> {
     println!(
         "Would you like to execute the following command in '{}'\n{}",
         work_dir.as_ref().display(),
@@ -245,7 +289,7 @@ async fn pretty_ask_execute(
 
     if !confirmation {
         println!("Command not executed!");
-        return Ok(None);
+        return Ok(PrettyAskCommandStatus::UserCancelled);
     }
 
     print_enter_command_context();
@@ -256,5 +300,10 @@ async fn pretty_ask_execute(
         .wait()
         .await?;
     print_return_daemon_context(exit_status.code());
-    Ok(Some(exit_status))
+
+    if exit_status.success() {
+        Ok(PrettyAskCommandStatus::CorrectlyExecuted)
+    } else {
+        Ok(PrettyAskCommandStatus::ExecutedWithNonZeroExit(exit_status))
+    }
 }

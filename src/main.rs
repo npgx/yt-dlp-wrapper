@@ -1,20 +1,11 @@
-extern crate core;
-
-mod client;
 mod lock;
 mod request;
 mod tty;
 mod video;
 
+pub(crate) mod tools;
+
 use clap::Parser;
-use std::sync::RwLock;
-
-pub(crate) const HEADER_VIDEO_REQUEST: &str = "67b99261-0b2c-49a9-bffd-b1f3e581f41b";
-//pub(crate) const HEADER_INOUT_BIND: &str = "80476dec-f270-4462-99e7-782c6c6a2d2f";
-
-pub(crate) static IS_VERBOSE: RwLock<bool> = RwLock::new(false);
-
-pub(crate) const BUFFER_SIZE: usize = 1024;
 
 pub(crate) type BoxBodyBytes = Box<
     dyn hyper::body::Body<
