@@ -1,12 +1,15 @@
-use crate::lock;
 use crate::video::VideoRequest;
+use crate::{lock, tools};
 use axum::routing::post;
+use dialoguer::theme::ColorfulTheme;
 use dialoguer::Confirm;
-use std::error::Error;
+use itertools::Itertools;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use std::process::ExitStatus;
+use std::time::Duration;
+use tower::ServiceBuilder;
 
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct TtyArgs {
@@ -14,6 +17,12 @@ pub(crate) struct TtyArgs {
     pub yt_dlp: PosixCommand,
     #[arg(long, visible_alias("beet-command"), value_parser = parse_beet, default_value = "beet import -m", help = "beet command to execute. Defaults to 'beet import -m'. '.' will be appended to the command, and the execution directory will be set as the yt-dlp download directory.")]
     pub beet: PosixCommand,
+    #[arg(
+        long,
+        visible_alias("acoustid-api-key"),
+        help = "API key that will be used for fingerprint lookup"
+    )]
+    pub acoustid_key: String,
 }
 
 fn parse_yt_dlp(raw: &str) -> Result<PosixCommand, DaemonError> {
@@ -142,6 +151,8 @@ pub(crate) struct TtyState {
 pub(crate) async fn run(args: TtyArgs) {
     /* *INOUT.lock().await = Some(InOut::std().await);*/
 
+    ffmpeg_next::init().expect("Could not initialize ffmpeg library");
+
     let mut lock = lock::get_lock()
         .await
         .expect("Failed to create lock to lockfile");
@@ -172,8 +183,18 @@ pub(crate) async fn run(args: TtyArgs) {
     println!("Daemon is running! Listening on 127.0.0.1:{}", port);
 
     tokio::spawn(async move {
+        let mut acoustid_client = reqwest::Client::builder()
+            .connector_layer(
+                ServiceBuilder::new()
+                    .layer(tower::buffer::BufferLayer::new(16))
+                    .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(2)))
+                    .layer(tower::limit::RateLimitLayer::new(3, Duration::from_secs(1))),
+            )
+            .build()
+            .expect("Could not initialize acoust_id reqwest client.");
+
         while let Some(vreq) = rx.recv().await {
-            handle_video_request(vreq, &args)
+            handle_video_request(vreq, &args, &mut acoustid_client)
                 .await
                 .expect("Failed to handle video request!");
         }
@@ -198,7 +219,8 @@ type DidRun = bool;
 async fn handle_video_request(
     request: VideoRequest,
     args: &TtyArgs,
-) -> Result<DidRun, Box<dyn Error + Send + Sync>> {
+    acoustid_client: &mut reqwest::Client,
+) -> Result<DidRun, anyhow::Error> {
     println!("Received request for {}", request.youtube_id);
 
     // ONLY pass this directory to pretty_ask_execute behind a reference, otherwise, the command execution will fail
@@ -213,6 +235,156 @@ async fn handle_video_request(
         PrettyAskCommandStatus::CorrectlyExecuted => {}
         PrettyAskCommandStatus::ExecutedWithNonZeroExit(_code) => {}
         PrettyAskCommandStatus::UserCancelled => {}
+    }
+
+    {
+        let mut contents = std::fs::read_dir(work_dir.path())?
+            .filter_map(|entry| {
+                entry
+                    .ok()
+                    .map(|entry| entry.file_name().into_string().ok())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        contents.insert(0, String::from("<none>"));
+
+        let mut defaults = vec![true; contents.len()];
+        defaults[0] = false;
+
+        let mut selections = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default()).with_prompt(
+            "Select files to fingerprint, if <none> is selected, all other selections will be ignored",
+        )
+            .items(&contents)
+            .defaults(&defaults)
+            .max_length(8)
+            .interact()?;
+
+        if selections.contains(&0) {
+            selections.clear();
+        }
+
+        let mut to_fingerprint = vec![];
+        for selection in selections {
+            to_fingerprint.push(contents[selection].clone());
+        }
+
+        for filename in to_fingerprint {
+            let filepath = work_dir.path().join(&filename);
+            let (fingerprint, track_duration) = tools::fingerprint_file(&filepath).await?;
+            let fingerprint_lookup = tools::acoustid::lookup_fingerprint(
+                acoustid_client,
+                fingerprint,
+                track_duration.floor() as u64,
+                &args.acoustid_key,
+            )
+            .await?;
+
+            let movedir = tempfile::tempdir()?;
+
+            match fingerprint_lookup.results {
+                Some(mut results) if fingerprint_lookup.status == "ok" && !results.is_empty() => {
+                    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+                    let results_display: Vec<String> = results
+                        .iter()
+                        .filter_map(|entry| {
+                            let empty = vec![];
+                            let recordings = entry.recordings.as_ref().unwrap_or(&empty);
+                            if recordings.is_empty() {
+                                None
+                            } else {
+                                let recordings_display = recordings
+                                    .iter()
+                                    .map(|entry| {
+                                        format!("https://musicbrainz.org/recording/{}", entry.id)
+                                    })
+                                    .join(", ");
+
+                                Some(format!(
+                                    "Score: {}, AcoustID: {}, Recordings: {}",
+                                    &entry.score, &entry.id, recordings_display
+                                ))
+                            }
+                        })
+                        .collect();
+
+                    if results_display.is_empty() {
+                        eprintln!("No associated AcoustID WITH RECORDINGS found!");
+                        continue;
+                    }
+
+                    let selection = dialoguer::Select::new()
+                        .with_prompt("Found matching AcoustID Tracks! Select the correct one, or <none> if none is correct (a secondary selection will appear when there are multiple associated recordings)")
+                        .item("<none>")
+                        .items(&results_display)
+                        .default(0)
+                        .max_length(16)
+                        .interact()?;
+                    if selection == 0 {
+                        continue;
+                    }
+
+                    let selection = match &results[selection - 1].recordings {
+                        Some(recordings) if !recordings.is_empty() => {
+                            if recordings.len() == 1 {
+                                println!(
+                                    "Automatically choosing recording https://musicbrainz.org/recording/{}",
+                                    &recordings[0].id
+                                );
+                                recordings[0].clone()
+                            } else {
+                                let recordings_display: Vec<String> = recordings
+                                    .iter()
+                                    .map(|entry| {
+                                        format!("https://musicbrainz.org/recording/{}", entry.id)
+                                    })
+                                    .collect();
+                                let recording_selection = dialoguer::Select::new()
+                                    .with_prompt("Choose correct recording")
+                                    .items(&recordings_display)
+                                    .default(0)
+                                    .max_length(16)
+                                    .interact()?;
+
+                                recordings[recording_selection].clone()
+                            }
+                        }
+                        _ => {
+                            panic!("Internal error!")
+                        }
+                    };
+
+                    let moved_filepath = movedir.path().join(&filename);
+                    println!(
+                        "Moving {} to {}",
+                        &filepath.display(),
+                        &moved_filepath.display()
+                    );
+                    std::fs::rename(&filepath, &moved_filepath)?;
+
+                    let cmd = [
+                        "ffmpeg",
+                        "-i",
+                        &format!("{}", moved_filepath.display().to_string()),
+                        "-metadata",
+                        &format!("MusicBrainz Track Id={}", selection.id),
+                        "-codec",
+                        "copy",
+                        &format!("{}", filepath.display().to_string()),
+                    ];
+
+                    print_enter_command_context(&cmd.join(" "));
+                    let output = tokio::process::Command::new(&cmd[0])
+                        .args(&cmd[1..])
+                        .current_dir(moved_filepath.parent().unwrap())
+                        .spawn()?
+                        .wait()
+                        .await?;
+                    print_return_daemon_context(output.code());
+                }
+                _ => {}
+            }
+        }
     }
 
     let mut beet_cmd = args.beet.components.clone();
@@ -231,8 +403,7 @@ async fn handle_video_request(
         .default(false)
         .show_default(true)
         .report(false)
-        .interact()
-        .map_err(|err| Box::new(err))?;
+        .interact()?;
 
     if do_persist_tempdir {
         let work_dir = work_dir.into_path();
@@ -242,15 +413,16 @@ async fn handle_video_request(
     Ok(true)
 }
 
-fn print_enter_command_context() {
+pub(crate) fn print_enter_command_context(full_command: impl AsRef<str>) {
     println!();
     println!("================================");
     println!("Entering command context.");
+    println!("Executing: {}", full_command.as_ref());
     println!("================================");
     println!();
 }
 
-fn print_return_daemon_context(return_code: Option<i32>) {
+pub(crate) fn print_return_daemon_context(return_code: Option<i32>) {
     println!();
     println!("================================");
     println!("Returned to daemon context.");
@@ -271,7 +443,7 @@ enum PrettyAskCommandStatus {
 async fn pretty_ask_execute(
     full_command: Vec<String>,
     work_dir: impl AsRef<Path>,
-) -> Result<PrettyAskCommandStatus, Box<dyn Error + Send + Sync>> {
+) -> Result<PrettyAskCommandStatus, anyhow::Error> {
     println!(
         "Would you like to execute the following command in '{}'\n{}",
         work_dir.as_ref().display(),
@@ -281,15 +453,14 @@ async fn pretty_ask_execute(
         .default(true)
         .show_default(true)
         .report(false)
-        .interact()
-        .map_err(|err| Box::new(err))?;
+        .interact()?;
 
     if !confirmation {
         println!("Command not executed!");
         return Ok(PrettyAskCommandStatus::UserCancelled);
     }
 
-    print_enter_command_context();
+    print_enter_command_context(&full_command.join(" "));
     let exit_status = tokio::process::Command::new(&full_command[0])
         .args(&full_command[1..])
         .current_dir(work_dir)

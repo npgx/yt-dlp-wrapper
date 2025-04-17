@@ -60,14 +60,14 @@ impl<Valid, Invalid, InvalidError> ChromaprintResult<Valid, Invalid, InvalidErro
     }
 }
 
-impl<Valid, Invalid, InvalidError: Error + 'static>
+impl<Valid, Invalid, InvalidError: Error + Send + Sync + 'static>
     ChromaprintResult<Valid, Invalid, InvalidError>
 {
-    pub(crate) fn into_result(self) -> Result<Valid, Box<dyn Error>> {
+    pub(crate) fn into_result(self) -> Result<Valid, anyhow::Error> {
         match self {
             ChromaprintResult::SuccessAndValid(value) => Ok(value),
-            ChromaprintResult::SuccessAndInvalid(_, err) => Err(Box::new(err)),
-            ChromaprintResult::Error(err) => Err(Box::new(err)),
+            ChromaprintResult::SuccessAndInvalid(_, err) => Err(err.into()),
+            ChromaprintResult::Error(err) => Err(err.into()),
         }
     }
 }
