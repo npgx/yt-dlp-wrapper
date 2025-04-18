@@ -16,6 +16,7 @@ async fn soft_open_rw_or_create_if_missing(path: &Path) -> Result<File, std::io:
                     .read(true)
                     .write(true)
                     .create(true)
+                    .truncate(false)
                     .open(path)
                     .await
             }

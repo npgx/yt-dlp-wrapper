@@ -35,5 +35,7 @@ pub(crate) async fn run(args: RequestArgs) {
 
     let status = response.status();
     response.error_for_status()
-        .expect(&format!("Video request for {yt_id} has been sent to daemon on {daemon_addr:?}, but daemon responded with error code {:?}!", status));
+        .unwrap_or_else(|err| {
+            panic!("Video request for {yt_id} has been sent to daemon on {daemon_addr:?}, but daemon responded with error code {:?}! err: {err}", status)
+        });
 }

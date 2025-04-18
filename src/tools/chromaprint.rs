@@ -232,7 +232,7 @@ impl ChromaprintFingerprint {
 
         match self {
             ChromaprintFingerprint::Compressed(value) => decompress(value, false),
-            ChromaprintFingerprint::Raw(value, algo) => Ok((Cow::Borrowed(value), algo.clone())),
+            ChromaprintFingerprint::Raw(value, algo) => Ok((Cow::Borrowed(value), *algo)),
             ChromaprintFingerprint::Base64URLSafe(value) => decompress(value.as_bytes(), true),
         }
     }
@@ -391,8 +391,8 @@ impl Chromaprint {
     ) -> Result<ChromaprintFingerprint, ChromaprintError> {
         self.start(sample_rate, num_channels)?;
 
-        let mut audio_data = audio_data.into_iter();
-        while let Some(audio_packet) = audio_data.next() {
+        let audio_data = audio_data.into_iter();
+        for audio_packet in audio_data {
             self.feed(audio_packet.as_ref())?;
         }
 

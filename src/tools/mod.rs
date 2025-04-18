@@ -11,7 +11,7 @@ pub async fn fingerprint_file(path: &Path) -> Result<(ChromaprintFingerprint, f6
     let mut fpcalc_cmd = vec![String::from("fpcalc"), String::from("-json")];
     fpcalc_cmd.push(path.display().to_string());
 
-    print_enter_command_context(&fpcalc_cmd.join(" "));
+    print_enter_command_context(fpcalc_cmd.join(" "));
     let output = tokio::process::Command::new(&fpcalc_cmd[0])
         .args(&fpcalc_cmd[1..])
         .current_dir(path.parent().unwrap())

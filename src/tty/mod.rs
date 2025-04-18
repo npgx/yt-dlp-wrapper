@@ -56,7 +56,7 @@ impl PosixCommand {
     }
 
     pub(crate) fn from_raw(raw: &str) -> Option<Self> {
-        shlex::split(raw).map(|split| Self::new(split))
+        shlex::split(raw).map(Self::new)
     }
 }
 
@@ -242,8 +242,7 @@ async fn handle_video_request(
             .filter_map(|entry| {
                 entry
                     .ok()
-                    .map(|entry| entry.file_name().into_string().ok())
-                    .flatten()
+                    .and_then(|entry| entry.file_name().into_string().ok())
             })
             .collect::<Vec<_>>();
         contents.insert(0, String::from("<none>"));
@@ -365,16 +364,16 @@ async fn handle_video_request(
                     let cmd = [
                         "ffmpeg",
                         "-i",
-                        &format!("{}", moved_filepath.display().to_string()),
+                        &moved_filepath.display().to_string(),
                         "-metadata",
                         &format!("MusicBrainz Track Id={}", selection.id),
                         "-codec",
                         "copy",
-                        &format!("{}", filepath.display().to_string()),
+                        &filepath.display().to_string(),
                     ];
 
-                    print_enter_command_context(&cmd.join(" "));
-                    let output = tokio::process::Command::new(&cmd[0])
+                    print_enter_command_context(cmd.join(" "));
+                    let output = tokio::process::Command::new(cmd[0])
                         .args(&cmd[1..])
                         .current_dir(moved_filepath.parent().unwrap())
                         .spawn()?
@@ -460,7 +459,7 @@ async fn pretty_ask_execute(
         return Ok(PrettyAskCommandStatus::UserCancelled);
     }
 
-    print_enter_command_context(&full_command.join(" "));
+    print_enter_command_context(full_command.join(" "));
     let exit_status = tokio::process::Command::new(&full_command[0])
         .args(&full_command[1..])
         .current_dir(work_dir)

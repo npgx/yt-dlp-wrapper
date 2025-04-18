@@ -7,17 +7,6 @@ pub(crate) mod tools;
 
 use clap::Parser;
 
-#[macro_export]
-macro_rules! verbose {
-    ($($arg:tt)*) => {
-        if let Ok(guard) = crate::IS_VERBOSE.read() {
-            if *guard {
-                println!($($arg)*);
-            }
-        }
-    };
-}
-
 #[derive(clap::Parser, Debug)]
 #[command(version, about, long_about = None, arg_required_else_help(true))]
 pub(crate) struct CliArgs {
