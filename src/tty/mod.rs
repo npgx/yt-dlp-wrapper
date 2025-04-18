@@ -1,9 +1,9 @@
+mod handle_requests;
+
+use crate::lock;
+use crate::tty::handle_requests::ExitStatusExt;
 use crate::video::VideoRequest;
-use crate::{lock, tools};
 use axum::routing::post;
-use dialoguer::theme::ColorfulTheme;
-use dialoguer::Confirm;
-use itertools::Itertools;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
@@ -194,7 +194,7 @@ pub(crate) async fn run(args: TtyArgs) {
             .expect("Could not initialize acoust_id reqwest client.");
 
         while let Some(vreq) = rx.recv().await {
-            handle_video_request(vreq, &args, &mut acoustid_client)
+            handle_requests::handle_video_request(vreq, &args, &mut acoustid_client)
                 .await
                 .expect("Failed to handle video request!");
         }
@@ -215,262 +215,63 @@ async fn post_video_request(
     Ok(())
 }
 
-type DidRun = bool;
-async fn handle_video_request(
-    request: VideoRequest,
-    args: &TtyArgs,
-    acoustid_client: &mut reqwest::Client,
-) -> Result<DidRun, anyhow::Error> {
-    println!("Received request for {}", request.youtube_id);
-
-    // ONLY pass this directory to pretty_ask_execute behind a reference, otherwise, the command execution will fail
-    // because work_dir will get dropped in the coercion from TempDir to Path (impl AsRef<Path>), which will delete the directory
-    // and print the error: Os { code: 2, kind: NotFound, message: "No such file or directory" }
-    let work_dir = tempfile::tempdir()?;
-
-    let mut ytdlp_cmd = args.yt_dlp.components.clone();
-    ytdlp_cmd.push(String::from("--"));
-    ytdlp_cmd.push(request.youtube_id);
-    match pretty_ask_execute(ytdlp_cmd, &work_dir).await? {
-        PrettyAskCommandStatus::CorrectlyExecuted => {}
-        PrettyAskCommandStatus::ExecutedWithNonZeroExit(_code) => {}
-        PrettyAskCommandStatus::UserCancelled => {}
-    }
-
-    {
-        let mut contents = std::fs::read_dir(work_dir.path())?
-            .filter_map(|entry| {
-                entry
-                    .ok()
-                    .and_then(|entry| entry.file_name().into_string().ok())
-            })
-            .collect::<Vec<_>>();
-        contents.insert(0, String::from("<none>"));
-
-        let mut defaults = vec![true; contents.len()];
-        defaults[0] = false;
-
-        let mut selections = dialoguer::MultiSelect::with_theme(&ColorfulTheme::default()).with_prompt(
-            "Select files to fingerprint, if <none> is selected, all other selections will be ignored",
-        )
-            .items(&contents)
-            .defaults(&defaults)
-            .max_length(8)
-            .interact()?;
-
-        if selections.contains(&0) {
-            selections.clear();
-        }
-
-        let mut to_fingerprint = vec![];
-        for selection in selections {
-            to_fingerprint.push(contents[selection].clone());
-        }
-
-        for filename in to_fingerprint {
-            let filepath = work_dir.path().join(&filename);
-            let (fingerprint, track_duration) = tools::fingerprint_file(&filepath).await?;
-            let fingerprint_lookup = tools::acoustid::lookup_fingerprint(
-                acoustid_client,
-                fingerprint,
-                track_duration.floor() as u64,
-                &args.acoustid_key,
-            )
-            .await?;
-
-            let movedir = tempfile::tempdir()?;
-
-            match fingerprint_lookup.results {
-                Some(mut results) if fingerprint_lookup.status == "ok" && !results.is_empty() => {
-                    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-
-                    let results_display: Vec<String> = results
-                        .iter()
-                        .filter_map(|entry| {
-                            let empty = vec![];
-                            let recordings = entry.recordings.as_ref().unwrap_or(&empty);
-                            if recordings.is_empty() {
-                                None
-                            } else {
-                                let recordings_display = recordings
-                                    .iter()
-                                    .map(|entry| {
-                                        format!("https://musicbrainz.org/recording/{}", entry.id)
-                                    })
-                                    .join(", ");
-
-                                Some(format!(
-                                    "Score: {}, AcoustID: {}, Recordings: {}",
-                                    &entry.score, &entry.id, recordings_display
-                                ))
-                            }
-                        })
-                        .collect();
-
-                    if results_display.is_empty() {
-                        eprintln!("No associated AcoustID WITH RECORDINGS found!");
-                        continue;
-                    }
-
-                    let selection = dialoguer::Select::new()
-                        .with_prompt("Found matching AcoustID Tracks! Select the correct one, or <none> if none is correct (a secondary selection will appear when there are multiple associated recordings)")
-                        .item("<none>")
-                        .items(&results_display)
-                        .default(0)
-                        .max_length(16)
-                        .interact()?;
-                    if selection == 0 {
-                        continue;
-                    }
-
-                    let selection = match &results[selection - 1].recordings {
-                        Some(recordings) if !recordings.is_empty() => {
-                            if recordings.len() == 1 {
-                                println!(
-                                    "Automatically choosing recording https://musicbrainz.org/recording/{}",
-                                    &recordings[0].id
-                                );
-                                recordings[0].clone()
-                            } else {
-                                let recordings_display: Vec<String> = recordings
-                                    .iter()
-                                    .map(|entry| {
-                                        format!("https://musicbrainz.org/recording/{}", entry.id)
-                                    })
-                                    .collect();
-                                let recording_selection = dialoguer::Select::new()
-                                    .with_prompt("Choose correct recording")
-                                    .items(&recordings_display)
-                                    .default(0)
-                                    .max_length(16)
-                                    .interact()?;
-
-                                recordings[recording_selection].clone()
-                            }
-                        }
-                        _ => {
-                            panic!("Internal error!")
-                        }
-                    };
-
-                    let moved_filepath = movedir.path().join(&filename);
-                    println!(
-                        "Moving {} to {}",
-                        &filepath.display(),
-                        &moved_filepath.display()
-                    );
-                    std::fs::rename(&filepath, &moved_filepath)?;
-
-                    let cmd = [
-                        "ffmpeg",
-                        "-i",
-                        &moved_filepath.display().to_string(),
-                        "-metadata",
-                        &format!("MusicBrainz Track Id={}", selection.id),
-                        "-codec",
-                        "copy",
-                        &filepath.display().to_string(),
-                    ];
-
-                    print_enter_command_context(cmd.join(" "));
-                    let output = tokio::process::Command::new(cmd[0])
-                        .args(&cmd[1..])
-                        .current_dir(moved_filepath.parent().unwrap())
-                        .spawn()?
-                        .wait()
-                        .await?;
-                    print_return_daemon_context(output.code());
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let mut beet_cmd = args.beet.components.clone();
-    beet_cmd.push(String::from("."));
-    match pretty_ask_execute(beet_cmd, &work_dir).await? {
-        PrettyAskCommandStatus::CorrectlyExecuted => {}
-        PrettyAskCommandStatus::ExecutedWithNonZeroExit(_code) => {}
-        PrettyAskCommandStatus::UserCancelled => {}
-    }
-
-    let do_persist_tempdir = Confirm::new()
-        .with_prompt(format!(
-            "Would you like to persist the temp directory '{}'?",
-            work_dir.path().display()
-        ))
-        .default(false)
-        .show_default(true)
-        .report(false)
-        .interact()?;
-
-    if do_persist_tempdir {
-        let work_dir = work_dir.into_path();
-        println!("Persisted directory '{}'", work_dir.display());
-    }
-
-    Ok(true)
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WithExitStatus<T> {
+    pub exit_status: ExitStatus,
+    pub data: T,
 }
 
-pub(crate) fn print_enter_command_context(full_command: impl AsRef<str>) {
+pub(crate) async fn wait_for_cmd(
+    mut child: tokio::process::Child,
+) -> Result<WithExitStatus<()>, std::io::Error> {
+    child.wait().await.map(|status| status.with_unit())
+}
+
+pub(crate) async fn wait_for_cmd_output(
+    child: tokio::process::Child,
+) -> Result<WithExitStatus<std::process::Output>, std::io::Error> {
+    child
+        .wait_with_output()
+        .await
+        .map(|output| output.status.with(output))
+}
+
+pub(crate) async fn wrap_command_print_context<T, Ex, FT, FTErr>(
+    full_command: &[impl AsRef<str>],
+    work_dir: &Path,
+    user_settings: impl FnOnce(tokio::process::Command) -> tokio::process::Command,
+    extract: Ex,
+) -> Result<WithExitStatus<T>, anyhow::Error>
+where
+    Ex: FnOnce(tokio::process::Child) -> FT,
+    FT: Future<Output = Result<WithExitStatus<T>, FTErr>>,
+    FTErr: std::error::Error + Send + Sync + 'static,
+{
+    let full_command = full_command.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+
     println!();
     println!("================================");
     println!("Entering command context.");
-    println!("Executing: {}", full_command.as_ref());
+    println!("Executing: {}", full_command.join(" "));
     println!("================================");
     println!();
-}
 
-pub(crate) fn print_return_daemon_context(return_code: Option<i32>) {
+    let mut command = tokio::process::Command::new(full_command[0]);
+    command.args(&full_command[1..]);
+    command.current_dir(work_dir);
+    let mut command = user_settings(command);
+    let child = command.spawn()?;
+    let result = extract(child).await?;
+
     println!();
     println!("================================");
     println!("Returned to daemon context.");
-    match return_code {
+    match &result.exit_status.code() {
         Some(code) => println!("Command returned exit code {}.", code),
         None => println!("Command was terminated by signal."),
     }
     println!("================================");
     println!();
-}
 
-enum PrettyAskCommandStatus {
-    CorrectlyExecuted,
-    ExecutedWithNonZeroExit(ExitStatus),
-    UserCancelled,
-}
-
-async fn pretty_ask_execute(
-    full_command: Vec<String>,
-    work_dir: impl AsRef<Path>,
-) -> Result<PrettyAskCommandStatus, anyhow::Error> {
-    println!(
-        "Would you like to execute the following command in '{}'\n{}",
-        work_dir.as_ref().display(),
-        full_command.join(" ")
-    );
-    let confirmation = Confirm::new()
-        .default(true)
-        .show_default(true)
-        .report(false)
-        .interact()?;
-
-    if !confirmation {
-        println!("Command not executed!");
-        return Ok(PrettyAskCommandStatus::UserCancelled);
-    }
-
-    print_enter_command_context(full_command.join(" "));
-    let exit_status = tokio::process::Command::new(&full_command[0])
-        .args(&full_command[1..])
-        .current_dir(work_dir)
-        .spawn()?
-        .wait()
-        .await?;
-    print_return_daemon_context(exit_status.code());
-
-    if exit_status.success() {
-        Ok(PrettyAskCommandStatus::CorrectlyExecuted)
-    } else {
-        Ok(PrettyAskCommandStatus::ExecutedWithNonZeroExit(exit_status))
-    }
+    Ok(result)
 }
