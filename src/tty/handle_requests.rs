@@ -12,41 +12,167 @@ pub(crate) async fn handle_video_request(
     args: &tty::TtyArgs,
     acoustid_client: &mut reqwest::Client,
 ) -> Result<DidRun, anyhow::Error> {
-    println!("Processing request for {}", request.youtube_id);
+    'request: loop {
+        println!("Processing request for {}", &request.youtube_id);
 
-    let work_dir = tempfile::tempdir()?;
+        let work_dir = tempfile::tempdir()?;
 
-    let mut ytdlp_cmd = args.yt_dlp.components.clone();
-    ytdlp_cmd.push(String::from("--"));
-    ytdlp_cmd.push(request.youtube_id);
-    let _yt_dlp_exit_status =
-        tty::wrap_command_print_context(&ytdlp_cmd, work_dir.path(), |cmd| cmd, tty::wait_for_cmd)
+        let mut ytdlp_cmd: Vec<&str> = Vec::with_capacity(args.yt_dlp.components.len());
+        for component in &args.yt_dlp.components {
+            ytdlp_cmd.push(component);
+        }
+        ytdlp_cmd.push("--");
+        ytdlp_cmd.push(&request.youtube_id);
+
+        'last_command: loop {
+            let yt_dlp_exit_status = tty::wrap_command_print_context(
+                &ytdlp_cmd,
+                work_dir.path(),
+                |cmd| cmd,
+                tty::wait_for_cmd,
+            )
             .await?;
 
-    handle_workdir_fingerprinting(work_dir.path(), acoustid_client, args).await?;
+            if !yt_dlp_exit_status.exit_status.success() {
+                match ask_action_on_command_error(true).await? {
+                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::RestartRequest => continue 'request,
+                    WhatToDo::Continue => break 'last_command,
+                    WhatToDo::AbortRequest => break 'request Ok(false),
+                }
+            }
 
-    let mut beet_cmd = args.beet.components.clone();
-    beet_cmd.push(String::from("."));
-    let _beet_exit_status =
-        tty::wrap_command_print_context(&beet_cmd, work_dir.path(), |cmd| cmd, tty::wait_for_cmd)
+            break 'last_command;
+        }
+
+        'last_command: loop {
+            if let Some(todo) =
+                handle_workdir_fingerprinting(work_dir.path(), acoustid_client, args).await?
+            {
+                match todo {
+                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::RestartRequest => continue 'request,
+                    WhatToDo::Continue => break 'last_command,
+                    WhatToDo::AbortRequest => break 'request Ok(false),
+                }
+            }
+
+            break 'last_command;
+        }
+
+        let mut beet_cmd: Vec<&str> = Vec::with_capacity(args.beet.components.len());
+        for component in &args.beet.components {
+            beet_cmd.push(component);
+        }
+        beet_cmd.push(".");
+        'last_command: loop {
+            let beet_exit_status = tty::wrap_command_print_context(
+                &beet_cmd,
+                work_dir.path(),
+                |cmd| cmd,
+                tty::wait_for_cmd,
+            )
             .await?;
 
-    let do_keep_tempdir = dialoguer::Confirm::new()
-        .with_prompt(format!(
-            "Would you like to keep the temp directory '{}'?",
-            work_dir.path().display()
-        ))
-        .default(false)
-        .show_default(true)
-        .wait_for_newline(true)
-        .interact()?;
+            if !beet_exit_status.exit_status.success() {
+                match ask_action_on_command_error(true).await? {
+                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::RestartRequest => continue 'request,
+                    WhatToDo::Continue => break 'last_command,
+                    WhatToDo::AbortRequest => break 'request Ok(false),
+                }
+            }
 
-    if do_keep_tempdir {
-        let work_dir = work_dir.into_path();
-        println!("Persisted directory '{}'", work_dir.display());
+            break 'last_command;
+        }
+
+        let do_keep_tempdir = dialoguer::Confirm::new()
+            .with_prompt(format!(
+                "Would you like to keep the temp directory '{}'?",
+                work_dir.path().display()
+            ))
+            .default(false)
+            .show_default(true)
+            .wait_for_newline(true)
+            .interact()?;
+
+        if do_keep_tempdir {
+            let work_dir = work_dir.into_path();
+            println!("Persisted directory '{}'", work_dir.display());
+        }
+
+        break 'request Ok(true);
+    }
+}
+
+pub(crate) enum WhatToDo {
+    RetryLastCommand,
+    RestartRequest,
+    Continue,
+    AbortRequest,
+}
+
+impl WhatToDo {
+    pub(crate) const fn options_display() -> &'static [&'static str] {
+        const OPTIONS: [&str; 4] = [
+            "Retry last command",
+            "Restart request",
+            "Continue to the next command",
+            "Abort the request",
+        ];
+        &OPTIONS
+    }
+    pub(crate) const fn options_display_no_continue() -> &'static [&'static str] {
+        const OPTIONS: [&str; 3] = ["Retry last command", "Restart request", "Abort the request"];
+        &OPTIONS
     }
 
-    Ok(true)
+    pub(crate) fn from_ordinal(ordinal: usize) -> Option<WhatToDo> {
+        match ordinal {
+            0 => Some(WhatToDo::RetryLastCommand),
+            1 => Some(WhatToDo::RestartRequest),
+            2 => Some(WhatToDo::Continue),
+            3 => Some(WhatToDo::AbortRequest),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_ordinal_no_continue(ordinal: usize) -> Option<WhatToDo> {
+        match ordinal {
+            0 => Some(WhatToDo::RetryLastCommand),
+            1 => Some(WhatToDo::RestartRequest),
+            2 => Some(WhatToDo::AbortRequest),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) async fn ask_action_on_command_error(
+    allow_continue: bool,
+) -> Result<WhatToDo, anyhow::Error> {
+    let todo = tokio::task::spawn_blocking(move || {
+        if allow_continue {
+            dialoguer::Select::new()
+                .with_prompt(
+                    "The last executed command returned a non-zero exit code, what would you like to do?",
+                )
+                .default(0)
+                .items(WhatToDo::options_display())
+                .interact()
+                .map(|ordinal| WhatToDo::from_ordinal(ordinal).unwrap())
+        } else {
+            dialoguer::Select::new()
+                .with_prompt(
+                    "The last executed command returned a non-zero exit code, what would you like to do?",
+                )
+                .default(0)
+                .items(WhatToDo::options_display_no_continue())
+                .interact()
+                .map(|ordinal| WhatToDo::from_ordinal_no_continue(ordinal).unwrap())
+        }
+    }).await??;
+
+    Ok(todo)
 }
 
 fn get_fingerprintable_directory_contents(path: &Path) -> Vec<String> {
@@ -66,7 +192,7 @@ async fn handle_workdir_fingerprinting(
     work_dir: &Path,
     acoustid_client: &mut reqwest::Client,
     args: &tty::TtyArgs,
-) -> Result<(), anyhow::Error> {
+) -> Result<Option<WhatToDo>, anyhow::Error> {
     let fingerprintable = get_fingerprintable_directory_contents(work_dir);
 
     let mut defaults = vec![true; fingerprintable.len() + 1];
@@ -95,18 +221,24 @@ async fn handle_workdir_fingerprinting(
 
     for filename in to_fingerprint {
         let filepath = work_dir.join(&filename);
-        handle_file_fingerprinting(&filepath, acoustid_client, args).await?;
+        if let Some(todo) = handle_file_fingerprinting(&filepath, acoustid_client, args).await? {
+            return Ok(Some(todo));
+        }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 async fn handle_file_fingerprinting(
     filepath: &Path,
     acoustid_client: &mut reqwest::Client,
     args: &tty::TtyArgs,
-) -> Result<(), anyhow::Error> {
-    let (fingerprint, track_duration) = tools::fingerprint_file(filepath).await?;
+) -> Result<Option<WhatToDo>, anyhow::Error> {
+    let (fingerprint, track_duration) = match tools::fingerprint_file(filepath).await? {
+        Ok(data) => data,
+        Err(todo) => return Ok(Some(todo)),
+    };
+
     let fingerprint_lookup = tools::acoustid::lookup_fingerprint(
         acoustid_client,
         fingerprint,
@@ -140,7 +272,8 @@ async fn handle_file_fingerprinting(
     }
 
     if results_with_recordings.is_empty() {
-        println!("No AcoustID matches with associated recordings!")
+        println!("No AcoustID matches with associated recordings!");
+        return Ok(None);
     }
 
     let results_display: Vec<String> = results_with_recordings
@@ -175,7 +308,7 @@ async fn handle_file_fingerprinting(
         let ffmpeg_cmd = [
             "ffmpeg",
             "-loglevel",
-            "warning",
+            &args.ffmpeg_loglevel,
             "-i",
             &moved_filepath.display().to_string(),
             "-metadata",
@@ -185,8 +318,26 @@ async fn handle_file_fingerprinting(
             &filepath.display().to_string(),
         ];
 
-        tty::wrap_command_print_context(&ffmpeg_cmd, movedir.path(), |cmd| cmd, tty::wait_for_cmd)
+        'last_command: loop {
+            let ffmpeg_exit_status = tty::wrap_command_print_context(
+                &ffmpeg_cmd,
+                movedir.path(),
+                |cmd| cmd,
+                tty::wait_for_cmd,
+            )
             .await?;
+
+            if !ffmpeg_exit_status.exit_status.success() {
+                match ask_action_on_command_error(true).await? {
+                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::RestartRequest => return Ok(Some(WhatToDo::RestartRequest)),
+                    WhatToDo::Continue => break 'last_command,
+                    WhatToDo::AbortRequest => return Ok(Some(WhatToDo::AbortRequest)),
+                }
+            }
+
+            break 'last_command;
+        }
 
         println!(
             "Copied '{}' to '{}' with MusicBrainz track id metadata",
@@ -194,9 +345,9 @@ async fn handle_file_fingerprinting(
             filepath.display()
         );
 
-        Ok(())
+        Ok(None)
     } else {
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -272,7 +423,7 @@ fn get_recording_from_selection_tree<'l>(
     };
 
     println!(
-        "Explore the various associated recordings: Select <none> if none is correct, otherwise, when an option is selected, a nested selection will appear specifying *which* MusicBrainz recordings are associated"
+        "Explore the various associated recordings: Select <none> if none is correct, otherwise, when an option is selected, a nested selection for the correct MusicBrainz recording will appear"
     );
 
     'outer: loop {
@@ -286,7 +437,7 @@ fn get_recording_from_selection_tree<'l>(
                                 "Confirm recording: https://musicbrainz.org/recording/{}",
                                 &record.id
                             ))
-                            .default(false)
+                            .default(true)
                             .show_default(true)
                             .wait_for_newline(true)
                             .interact()

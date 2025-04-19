@@ -1,4 +1,4 @@
-mod handle_requests;
+pub(crate) mod handle_requests;
 
 use crate::lock;
 use crate::tty::handle_requests::ExitStatusExt;
@@ -23,6 +23,12 @@ pub(crate) struct TtyArgs {
         help = "API key that will be used for fingerprint lookup"
     )]
     pub acoustid_key: String,
+    #[arg(
+        long,
+        default_value = "warning",
+        help = "-loglevel to pass to ffmpeg commands"
+    )]
+    pub ffmpeg_loglevel: String,
 }
 
 fn parse_yt_dlp(raw: &str) -> Result<PosixCommand, DaemonError> {
@@ -150,8 +156,6 @@ pub(crate) struct TtyState {
 
 pub(crate) async fn run(args: TtyArgs) {
     /* *INOUT.lock().await = Some(InOut::std().await);*/
-
-    ffmpeg_next::init().expect("Could not initialize ffmpeg library");
 
     let mut lock = lock::get_lock()
         .await
