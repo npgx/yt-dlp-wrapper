@@ -37,7 +37,7 @@ pub async fn lookup_fingerprint(
         .query(&[
             ("client", client_api_key),
             ("format", "json"),
-            ("fingerprint", &fingerprint),
+            ("fingerprint", fingerprint),
             ("meta", "recordings"),
             ("duration", &track_duration.to_string()),
         ])

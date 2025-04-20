@@ -498,11 +498,11 @@ fn fetch_recording_data_from_mbz(
         )
     }
 
-    let mut entries = entry.recordings.clone().unwrap_or_else(Vec::new);
+    let mut entries = entry.recordings.clone().unwrap_or_default();
     let mut recordings = Vec::new();
 
     'fetch: loop {
-        entries.retain(|entry| match entry_to_recording(&entry, &runtime) {
+        entries.retain(|entry| match entry_to_recording(entry, runtime) {
             Ok(recording) => {
                 recordings.push(recording);
                 false
