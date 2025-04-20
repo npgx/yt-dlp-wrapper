@@ -6,10 +6,10 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
     
-    pkg_config::Config::new()
+    /*pkg_config::Config::new()
         .atleast_version("1.5.1")
         .probe("libchromaprint")
-        .expect("Unable to find chromaprint library!");
+        .expect("Unable to find chromaprint library!");*/
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindgen::Builder::default()

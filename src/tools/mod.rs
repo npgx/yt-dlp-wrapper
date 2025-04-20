@@ -1,16 +1,16 @@
-use crate::tools::chromaprint::ChromaprintFingerprint;
 use crate::tools::fpcalc::FPCalcJsonOutput;
 use crate::tty;
 use std::path::Path;
 use std::process::Stdio;
 
 pub(crate) mod acoustid;
-pub(crate) mod chromaprint;
 pub(crate) mod fpcalc;
+
+pub(crate) type ChromaprintFingerprint = String;
 
 pub async fn fingerprint_file(
     path: &Path,
-) -> Result<Result<(ChromaprintFingerprint, f64), tty::handle_requests::WhatToDo>, anyhow::Error> {
+) -> Result<Result<FPCalcJsonOutput, tty::handle_requests::WhatToDo>, anyhow::Error> {
     let mut fpcalc_cmd = vec![String::from("fpcalc"), String::from("-json")];
     fpcalc_cmd.push(path.display().to_string());
 
@@ -30,7 +30,15 @@ pub async fn fingerprint_file(
         .await?;
 
         if !output.exit_status.success() {
-            match tty::handle_requests::ask_action_on_command_error(false).await? {
+            match tty::handle_requests::ask_action_on_command_error(
+                format!(
+                    "fpcalc returned a non-zero exit code: {}",
+                    output.exit_status
+                ),
+                false,
+            )
+            .await?
+            {
                 WhatToDo::RetryLastCommand => continue 'last_command,
                 WhatToDo::Continue => panic!(),
                 WhatToDo::RestartRequest => return Ok(Err(WhatToDo::RestartRequest)),
@@ -43,8 +51,5 @@ pub async fn fingerprint_file(
 
     let fpcalc_output: FPCalcJsonOutput = serde_json::from_slice(&output.stdout)?;
 
-    Ok(Ok((
-        ChromaprintFingerprint::from_base64_urlsafe(fpcalc_output.fingerprint),
-        fpcalc_output.duration,
-    )))
+    Ok(Ok(fpcalc_output))
 }

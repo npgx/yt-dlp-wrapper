@@ -1,0 +1,14 @@
+#! /bin/bash
+
+set -euo pipefail
+
+temp_file="$(mktemp -t yt-dlp-wrapper-submit-request.XXXXXXXX)"
+
+if ! /bin/bash -c "yt-dlp-wrapper request --yt-url '$1'" 2> "$temp_file"; then
+    notify-send -t 6000 "yt-dlp-wrapper" "$(cat "$temp_file")"
+else
+    notify-send -t 1000 "yt-dlp-wrapper" "Request Enqueued!"
+fi
+
+# housekeeping
+rm "$temp_file"

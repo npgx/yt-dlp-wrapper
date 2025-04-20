@@ -3,12 +3,14 @@ pub(crate) mod handle_requests;
 use crate::lock;
 use crate::tty::handle_requests::ExitStatusExt;
 use crate::video::VideoRequest;
+use axum::response::Response;
 use axum::routing::post;
+use clap::arg;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
-use std::process::ExitStatus;
 use std::time::Duration;
+use tokio::sync::mpsc::error::TrySendError;
 use tower::ServiceBuilder;
 
 #[derive(clap::Args, Debug, Clone)]
@@ -29,6 +31,33 @@ pub(crate) struct TtyArgs {
         help = "-loglevel to pass to ffmpeg commands"
     )]
     pub ffmpeg_loglevel: String,
+    #[arg(
+        long,
+        default_value = "16",
+        alias = "max-request",
+        help = "maximum amount of video requests that can be enqueued by request instances (this does not include the request currently being processed). Defaults to 16, will be coerced between 1 and 128 inclusive"
+    )]
+    pub max_requests: usize,
+    #[arg(long, default_value = "never", value_parser = parse_prompt_flag, help = "Valid values: 'never', 'always', 'ask', defaults to never. It controls whether or not to keep the tmp directory where the commands are executed")]
+    pub keep_tmp: PromptFlag,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PromptFlag {
+    Always,
+    Ask,
+    Never,
+}
+
+fn parse_prompt_flag(prompt: &str) -> Result<PromptFlag, DaemonError> {
+    match prompt {
+        "always" => Ok(PromptFlag::Always),
+        "ask" => Ok(PromptFlag::Ask),
+        "never" => Ok(PromptFlag::Never),
+        _ => Err(DaemonError::InvalidKeepTmp {
+            provided: prompt.to_string(),
+        }),
+    }
 }
 
 fn parse_yt_dlp(raw: &str) -> Result<PosixCommand, DaemonError> {
@@ -49,6 +78,8 @@ pub enum DaemonError {
     YtDlpCommand { erroneous_command: String },
     #[error("The provided beet command is malformed")]
     BeetCommand { erroneous_command: String },
+    #[error("The provided keep-tmp value is invalid")]
+    InvalidKeepTmp { provided: String },
 }
 
 #[derive(Debug, Clone)]
@@ -72,91 +103,12 @@ impl Display for PosixCommand {
     }
 }
 
-/*pub(crate) struct InOut {
-    from: Option<SocketAddr>,
-    stdin_join: Option<tokio::task::JoinHandle<()>>,
-    pub stdin: sluice::pipe::PipeReader,
-    stdout_join: Option<tokio::task::JoinHandle<()>>,
-    pub stdout: sluice::pipe::PipeWriter,
-}
-
-impl InOut {
-    pub(crate) async fn std() -> Self {
-        let (myin, mut myin_writer) = sluice::pipe::pipe();
-        let (mut myout_reader, myout) = sluice::pipe::pipe();
-
-        let stdin_join = tokio::spawn(async move {
-            let buf = Arc::new(tokio::sync::Mutex::new(vec![0; BUFFER_SIZE]));
-            loop {
-                let lambda_buf = buf.clone();
-                let read_count = tokio::task::spawn_blocking(move || {
-                    std::io::stdin()
-                        .read(&mut *lambda_buf.blocking_lock())
-                        .expect("Error reading from stdin")
-                })
-                .await
-                .expect("Failed to join stdin read blocking task");
-
-                if read_count == 0 {
-                    break;
-                }
-
-                if let Err(_) = myin_writer.write_all(&buf.lock().await[..read_count]).await {
-                    break;
-                }
-            }
-        });
-
-        let stdout_join = tokio::spawn(async move {
-            let buf = Arc::new(tokio::sync::Mutex::new(vec![0; BUFFER_SIZE]));
-            while let Ok(read_count) = myout_reader.read(&mut *buf.lock().await).await {
-                if read_count == 0 {
-                    break;
-                }
-
-                let lambda_buf = buf.clone();
-                tokio::task::spawn_blocking(move || {
-                    std::io::stdout()
-                        .write_all(&lambda_buf.blocking_lock()[..read_count])
-                        .expect("Error writing to stdout");
-                })
-                .await
-                .expect("Failed to join stdout write task");
-            }
-        });
-
-        InOut {
-            from: None,
-            stdin_join: Some(stdin_join),
-            stdin: myin,
-            stdout_join: Some(stdout_join),
-            stdout: myout,
-        }
-    }
-}
-
-impl Drop for InOut {
-    fn drop(&mut self) {
-        if let Some(handle) = self.stdin_join.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.stdout_join.take() {
-            handle.abort();
-        }
-    }
-}*/
-
-/*pub(crate) static INOUT: once_cell::sync::Lazy<tokio::sync::Mutex<Option<InOut>>> =
-once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(None));*/
-
 #[derive(Clone)]
 pub(crate) struct TtyState {
     pub vreq_sender: tokio::sync::mpsc::Sender<VideoRequest>,
 }
 
 pub(crate) async fn run(args: TtyArgs) {
-    /* *INOUT.lock().await = Some(InOut::std().await);*/
-
     let mut lock = lock::get_lock()
         .await
         .expect("Failed to create lock to lockfile");
@@ -178,7 +130,7 @@ pub(crate) async fn run(args: TtyArgs) {
         .expect("Failed to write TCP listener port to portfile!");
 
     // using a mpsc queue lets us asynchronously add to the queue but handle the requests one at a time in the terminal
-    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(args.max_requests.clamp(1, 128));
 
     let app = axum::Router::new()
         .route("/video-request", post(post_video_request))
@@ -194,6 +146,7 @@ pub(crate) async fn run(args: TtyArgs) {
                     .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(2)))
                     .layer(tower::limit::RateLimitLayer::new(3, Duration::from_secs(1))),
             )
+            .https_only(true)
             .build()
             .expect("Could not initialize acoust_id reqwest client.");
 
@@ -207,21 +160,46 @@ pub(crate) async fn run(args: TtyArgs) {
     axum::serve(tcpl, app).await.unwrap();
 }
 
+struct ErrorResponse {
+    status_code: axum::http::StatusCode,
+    msg: String,
+}
+
+impl ErrorResponse {
+    pub fn new(status_code: axum::http::StatusCode, msg: String) -> Self {
+        Self { status_code, msg }
+    }
+}
+
+impl axum::response::IntoResponse for ErrorResponse {
+    fn into_response(self) -> Response {
+        (self.status_code, self.msg).into_response()
+    }
+}
+
 async fn post_video_request(
     axum::extract::State(state): axum::extract::State<TtyState>,
     axum::Form(vreq): axum::Form<VideoRequest>,
-) -> Result<(), String> {
-    state
-        .vreq_sender
-        .send(vreq)
-        .await
-        .map_err(|err| format!("{err:?}"))?;
-    Ok(())
+) -> Result<(), ErrorResponse> {
+    match state.vreq_sender.try_send(vreq) {
+        Ok(_) => Ok(()),
+        Err(error) => match error {
+            TrySendError::Full(_) => Err(ErrorResponse::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                String::from("Cannot enqueue: Video request queue capacity exceeded!"),
+            )),
+            // shouldn't happen
+            TrySendError::Closed(_) => Err(ErrorResponse::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                String::from("Cannot enqueue: Video request queue closed!"),
+            )),
+        },
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WithExitStatus<T> {
-    pub exit_status: ExitStatus,
+    pub exit_status: std::process::ExitStatus,
     pub data: T,
 }
 

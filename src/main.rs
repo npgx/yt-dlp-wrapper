@@ -23,14 +23,13 @@ pub(crate) enum Command {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), anyhow::Error> {
     let args = CliArgs::parse();
     match args.command {
         Command::Tty(args) => {
             tty::run(args).await;
+            Ok(())
         }
-        Command::Request(args) => {
-            request::run(args).await;
-        }
+        Command::Request(args) => request::run(args).await,
     }
 }

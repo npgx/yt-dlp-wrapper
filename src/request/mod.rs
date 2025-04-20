@@ -1,6 +1,8 @@
 use crate::lock;
 use crate::video;
+use anyhow::anyhow;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct RequestArgs {
@@ -11,31 +13,38 @@ pub(crate) struct RequestArgs {
     pub yt_url: String,
 }
 
-pub(crate) async fn run(args: RequestArgs) {
+pub(crate) async fn run(args: RequestArgs) -> Result<(), anyhow::Error> {
     let port = lock::read_port_no_lock()
         .await
         .expect("Failed to read daemon port from portfile! Is the daemon running?");
 
-    let daemon_addr = format!("127.0.0.1:{}", port).parse::<SocketAddr>().unwrap();
+    let daemon_addr = format!("127.0.0.1:{}", port).parse::<SocketAddr>()?;
     let client = reqwest::Client::builder()
         .build()
         .expect("Failed to create http client!");
 
-    println!("Sending request to daemon on {:?}", daemon_addr);
-    let video_request =
-        video::VideoRequest::from_yt_url(&args.yt_url).expect("Failed to create video request!");
+    println!("Creating video request...");
+    let video_request = video::VideoRequest::from_yt_url(&args.yt_url)?;
     let yt_id = video_request.youtube_id.clone();
 
+    println!("Sending request to daemon on {:?}", daemon_addr);
     let response = client
         .post(format!("http://127.0.0.1:{}/video-request", port))
         .form(&video_request)
+        .timeout(Duration::from_secs(1))
         .send()
-        .await
-        .expect("Failed to send http request to daemon!");
+        .await?;
 
-    let status = response.status();
-    response.error_for_status()
-        .unwrap_or_else(|err| {
-            panic!("Video request for {yt_id} has been sent to daemon on {daemon_addr:?}, but daemon responded with error code {:?}! err: {err}", status)
-        });
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Daemon ({daemon_addr:?}) for {yt_id} (http code: {}); {}",
+            response.status(),
+            response
+                .text()
+                .await
+                .unwrap_or_else(|_| String::from("<unable to decode daemon response>")),
+        ))
+    }
 }

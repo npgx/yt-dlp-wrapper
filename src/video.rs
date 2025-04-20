@@ -5,9 +5,9 @@ pub(crate) struct VideoRequest {
     pub youtube_id: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum VideoRequestUrlParseError {
-    #[allow(dead_code)]
+    #[error("Unknown url kind")]
     UnknownUrlKind(Url),
 }
 
