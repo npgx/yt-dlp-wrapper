@@ -1,5 +1,6 @@
 use crate::tools::fpcalc::FPCalcJsonOutput;
 use crate::tty;
+use console::style;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -31,15 +32,16 @@ pub async fn fingerprint_file(
 
         if !output.exit_status.success() {
             match tty::handle_requests::ask_action_on_command_error(
-                format!(
+                style(format!(
                     "fpcalc returned a non-zero exit code: {}",
                     output.exit_status
-                ),
+                ))
+                .red(),
                 false,
             )
             .await?
             {
-                WhatToDo::RetryLastCommand => continue 'last_command,
+                WhatToDo::Retry => continue 'last_command,
                 WhatToDo::Continue => panic!(),
                 WhatToDo::RestartRequest => return Ok(Err(WhatToDo::RestartRequest)),
                 WhatToDo::AbortRequest => return Ok(Err(WhatToDo::AbortRequest)),

@@ -6,6 +6,7 @@ use crate::video::VideoRequest;
 use axum::response::Response;
 use axum::routing::post;
 use clap::arg;
+use console::style;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
@@ -136,7 +137,11 @@ pub(crate) async fn run(args: TtyArgs) {
         .route("/video-request", post(post_video_request))
         .with_state(TtyState { vreq_sender: tx });
 
-    println!("Daemon is running! Listening on 127.0.0.1:{}", port);
+    println!(
+        "{} Listening on 127.0.0.1:{}",
+        style("Daemon is running!").green(),
+        port
+    );
 
     tokio::spawn(async move {
         let mut acoustid_client = reqwest::Client::builder()
@@ -151,9 +156,19 @@ pub(crate) async fn run(args: TtyArgs) {
             .expect("Could not initialize acoust_id reqwest client.");
 
         while let Some(vreq) = rx.recv().await {
-            handle_requests::handle_video_request(vreq, &args, &mut acoustid_client)
-                .await
-                .expect("Failed to handle video request!");
+            let result =
+                handle_requests::handle_video_request(vreq, &args, &mut acoustid_client).await;
+
+            match result {
+                Ok(true) => {}
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "{}\n{error}",
+                        style("Failed to handle video request!").for_stderr().red()
+                    )
+                }
+            }
         }
     });
 
@@ -231,11 +246,22 @@ where
 {
     let full_command = full_command.iter().map(AsRef::as_ref).collect::<Vec<_>>();
 
+    static SEPARATOR: once_cell::sync::OnceCell<String> = once_cell::sync::OnceCell::new();
+
+    let separator: &str = SEPARATOR.get_or_init(|| {
+        let width = console::Term::stdout().size().1 as usize;
+        let mut sep = String::with_capacity(width);
+        for _ in 0..width {
+            sep.push('=');
+        }
+        sep
+    });
+
     println!();
-    println!("================================");
+    println!("{}", style(separator).cyan());
     println!("Entering command context.");
     println!("Executing: {}", full_command.join(" "));
-    println!("================================");
+    println!("{}", style(separator).cyan());
     println!();
 
     let mut command = tokio::process::Command::new(full_command[0]);
@@ -246,13 +272,26 @@ where
     let result = extract(child).await?;
 
     println!();
-    println!("================================");
+    println!("{}", style(separator).yellow());
     println!("Returned to daemon context.");
-    match &result.exit_status.code() {
-        Some(code) => println!("Command returned exit code {}.", code),
-        None => println!("Command was terminated by signal."),
+    if result.exit_status.success() {
+        println!(
+            "{}",
+            style(format!(
+                "Command returned exit code {}.",
+                &result.exit_status.code().unwrap()
+            ))
+            .green()
+        );
+    } else if let Some(err_code) = result.exit_status.code() {
+        println!(
+            "{}",
+            style(format!("Command returned exit code {}.", err_code)).red()
+        );
+    } else {
+        println!("{}", style("Command was terminated by signal.").red());
     }
-    println!("================================");
+    println!("{}", style(separator).yellow());
     println!();
 
     Ok(result)

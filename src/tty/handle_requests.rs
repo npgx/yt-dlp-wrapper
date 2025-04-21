@@ -2,6 +2,7 @@ use crate::tools::acoustid;
 use crate::tools::acoustid::response::{LookupResultsEntry, RecordingEntry};
 use crate::tty::{PromptFlag, WithExitStatus};
 use crate::{tools, tty};
+use console::style;
 use musicbrainz_rs::Fetch;
 use std::borrow::Cow;
 use std::path::Path;
@@ -37,15 +38,16 @@ pub(crate) async fn handle_video_request(
 
             if !yt_dlp_exit_status.exit_status.success() {
                 match ask_action_on_command_error(
-                    format!(
+                    style(format!(
                         "yt-dlp returned a non-zero exit code: {}",
                         yt_dlp_exit_status.exit_status
-                    ),
+                    ))
+                    .red(),
                     true,
                 )
                 .await?
                 {
-                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::Retry => continue 'last_command,
                     WhatToDo::RestartRequest => continue 'request,
                     WhatToDo::Continue => break 'last_command,
                     WhatToDo::AbortRequest => break 'request Ok(false),
@@ -60,7 +62,7 @@ pub(crate) async fn handle_video_request(
                 handle_workdir_fingerprinting(work_dir_path, acoustid_client, args).await?
             {
                 match todo {
-                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::Retry => continue 'last_command,
                     WhatToDo::RestartRequest => continue 'request,
                     WhatToDo::Continue => break 'last_command,
                     WhatToDo::AbortRequest => break 'request Ok(false),
@@ -86,15 +88,16 @@ pub(crate) async fn handle_video_request(
 
             if !beet_exit_status.exit_status.success() {
                 match ask_action_on_command_error(
-                    format!(
+                    style(format!(
                         "beet returned a non-zero exit code: {}",
                         beet_exit_status.exit_status
-                    ),
+                    ))
+                    .red(),
                     true,
                 )
                 .await?
                 {
-                    WhatToDo::RetryLastCommand => continue 'last_command,
+                    WhatToDo::Retry => continue 'last_command,
                     WhatToDo::RestartRequest => continue 'request,
                     WhatToDo::Continue => break 'last_command,
                     WhatToDo::AbortRequest => break 'request Ok(false),
@@ -110,9 +113,10 @@ pub(crate) async fn handle_video_request(
             PromptFlag::Ask => {
                 let work_dir_path_display = work_dir_path.display().to_string();
                 tokio::task::spawn_blocking(move || {
-                    dialoguer::Confirm::new()
+                    dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
                         .with_prompt(format!(
-                            "Would you like to keep the temp directory '{}'?",
+                            "Would you like to {} the temp directory '{}'?",
+                            style("keep").yellow(),
                             work_dir_path_display
                         ))
                         .default(false)
@@ -134,7 +138,7 @@ pub(crate) async fn handle_video_request(
 }
 
 pub(crate) enum WhatToDo {
-    RetryLastCommand,
+    Retry,
     RestartRequest,
     Continue,
     AbortRequest,
@@ -143,21 +147,21 @@ pub(crate) enum WhatToDo {
 impl WhatToDo {
     pub(crate) const fn options_display() -> &'static [&'static str] {
         const OPTIONS: [&str; 4] = [
-            "Retry last command",
-            "Restart request",
-            "Continue to the next command",
-            "Abort the request",
+            "Retry",
+            "Restart video request",
+            "Continue...",
+            "Abort the video request",
         ];
         &OPTIONS
     }
     pub(crate) const fn options_display_no_continue() -> &'static [&'static str] {
-        const OPTIONS: [&str; 3] = ["Retry last command", "Restart request", "Abort the request"];
+        const OPTIONS: [&str; 3] = ["Retry", "Restart video request", "Abort the video request"];
         &OPTIONS
     }
 
     pub(crate) fn from_ordinal(ordinal: usize) -> Option<WhatToDo> {
         match ordinal {
-            0 => Some(WhatToDo::RetryLastCommand),
+            0 => Some(WhatToDo::Retry),
             1 => Some(WhatToDo::RestartRequest),
             2 => Some(WhatToDo::Continue),
             3 => Some(WhatToDo::AbortRequest),
@@ -167,7 +171,7 @@ impl WhatToDo {
 
     pub(crate) fn from_ordinal_no_continue(ordinal: usize) -> Option<WhatToDo> {
         match ordinal {
-            0 => Some(WhatToDo::RetryLastCommand),
+            0 => Some(WhatToDo::Retry),
             1 => Some(WhatToDo::RestartRequest),
             2 => Some(WhatToDo::AbortRequest),
             _ => None,
@@ -176,20 +180,26 @@ impl WhatToDo {
 }
 
 pub(crate) async fn ask_action_on_command_error(
-    message: String,
+    message: console::StyledObject<String>,
     allow_continue: bool,
 ) -> Result<WhatToDo, anyhow::Error> {
     let todo = tokio::task::spawn_blocking(move || {
         if allow_continue {
-            dialoguer::Select::new()
-                .with_prompt(format!("{message}\nWhat would you like to do?"))
+            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(format!(
+                    "{message}\n{}",
+                    style("What would you like to do?").cyan()
+                ))
                 .default(0)
                 .items(WhatToDo::options_display())
                 .interact()
                 .map(|ordinal| WhatToDo::from_ordinal(ordinal).unwrap())
         } else {
-            dialoguer::Select::new()
-                .with_prompt(format!("{message}\nWhat would you like to do?"))
+            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(format!(
+                    "{message}\n{}",
+                    style("What would you like to do?").cyan()
+                ))
                 .default(0)
                 .items(WhatToDo::options_display_no_continue())
                 .interact()
@@ -226,20 +236,23 @@ async fn handle_workdir_fingerprinting(
 
     let selections_fingerprintable = fingerprintable.clone();
     let mut selections = tokio::task::spawn_blocking(move || {
-        dialoguer::MultiSelect::new()
-            .with_prompt(
-                "Select files to fingerprint, if <none> is selected, all other selections will be ignored",
-            )
+        dialoguer::MultiSelect::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt(format!(
+                "Select files to fingerprint, if {} is selected, {}",
+                style("<none>").bold(),
+                style("all other selections will be ignored").italic().red()
+            ))
             .item("<none>")
             .items(&selections_fingerprintable)
             .defaults(&defaults)
             .max_length(16)
             .interact()
-    }).await??;
+    })
+    .await??;
 
     // is <none> selected
     if selections.contains(&0) {
-        println!("Fingerprinting none!");
+        println!("{}", style("Fingerprinting disabled!").magenta().bold());
         selections.clear();
     }
 
@@ -295,15 +308,22 @@ async fn handle_file_fingerprinting(
 
     if !results_others.is_empty() {
         println!(
-            "Ignoring {} matches that do not have any associated recordings!",
-            results_others.len()
+            "{}",
+            style(format!(
+                "Ignoring {} matches that do not have any associated recordings!",
+                results_others.len()
+            ))
+            .yellow()
         );
     }
 
     let runtime = tokio::runtime::Handle::current();
 
     let mut selection = if results_with_recordings.is_empty() {
-        println!("No AcoustID matches with associated recordings!");
+        println!(
+            "{}",
+            style("No AcoustID matches with associated recordings!").magenta()
+        );
         None
     } else {
         tokio::task::spawn_blocking(move || {
@@ -317,8 +337,11 @@ async fn handle_file_fingerprinting(
         static ACOUSTID_USER_KEY: OnceCell<String> = OnceCell::new();
 
         let submit = tokio::task::spawn_blocking(move || {
-            dialoguer::Confirm::new()
-                .with_prompt("Would you like to submit the fingerprint?")
+            dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(format!(
+                    "{}",
+                    style("Would you like to submit the fingerprint?").cyan()
+                ))
                 .default(true)
                 .show_default(true)
                 .wait_for_newline(true)
@@ -334,13 +357,13 @@ async fn handle_file_fingerprinting(
                     // don't set it asap, set it when the request succeeds
                     'api_key: loop {
                         let user_input = tokio::task::spawn_blocking(move || {
-                            dialoguer::Input::<String>::new()
-                                .with_prompt(
-                                    "Insert the AcoustID user API key (https://acoustid.org)",
-                                )
-                                .allow_empty(false)
-                                .report(false)
-                                .interact_text()
+                            dialoguer::Input::<String>::with_theme(
+                                &dialoguer::theme::ColorfulTheme::default(),
+                            )
+                            .with_prompt("Insert the AcoustID user API key (https://acoustid.org)")
+                            .allow_empty(false)
+                            .report(false)
+                            .interact_text()
                         })
                         .await?;
                         match user_input {
@@ -352,7 +375,7 @@ async fn handle_file_fingerprinting(
 
                 let mbid = 'mbid: loop {
                     let tmp = tokio::task::spawn_blocking(move || {
-                        dialoguer::Input::<String>::new()
+                        dialoguer::Input::<String>::with_theme(&dialoguer::theme::ColorfulTheme::default())
                             .with_prompt("Insert the MusicBrainz RECORDING ID that you would like to bind to the fingerprint")
                             .allow_empty(false)
                             .report(true)
@@ -362,15 +385,18 @@ async fn handle_file_fingerprinting(
                         Ok(value) => {
                             let value2 = value.clone();
                             let confirm = tokio::task::spawn_blocking(move || {
-                                dialoguer::Confirm::new()
-                                    .with_prompt(format!(
-                                        "Confirm MusicBrainz RECORDING ID: {}",
-                                        value2
-                                    ))
-                                    .default(true)
-                                    .show_default(true)
-                                    .wait_for_newline(true)
-                                    .interact()
+                                dialoguer::Confirm::with_theme(
+                                    &dialoguer::theme::ColorfulTheme::default(),
+                                )
+                                .with_prompt(format!(
+                                    "{}: {}",
+                                    style("Confirm MusicBrainz RECORDING ID").green(),
+                                    value2
+                                ))
+                                .default(true)
+                                .show_default(true)
+                                .wait_for_newline(true)
+                                .interact()
                             })
                             .await??;
 
@@ -380,7 +406,9 @@ async fn handle_file_fingerprinting(
                                 continue 'mbid;
                             }
                         }
-                        Err(err) => eprintln!("Invalid Record ID: {}", err),
+                        Err(err) => {
+                            eprintln!("{}: {}", style("Invalid Record ID").for_stderr().red(), err)
+                        }
                     }
                 };
 
@@ -395,10 +423,19 @@ async fn handle_file_fingerprinting(
                 .await?;
 
                 match what_to_do {
-                    Some(WhatToDo::RetryLastCommand) => continue 'submit,
+                    Some(WhatToDo::Retry) => continue 'submit,
                     Some(WhatToDo::RestartRequest) => return Ok(Some(WhatToDo::AbortRequest)),
-                    None | Some(WhatToDo::Continue) => {
-                        let _ = selection.insert(recording);
+                    None => {
+                        println!(
+                            "{}",
+                            style("Persisting AcoustID User Key (for current session)").magenta()
+                        );
+                        ACOUSTID_USER_KEY.get_or_init(|| acoustid_user_key.into_owned());
+                        selection.replace(recording);
+                        break 'submit;
+                    }
+                    Some(WhatToDo::Continue) => {
+                        selection.replace(recording);
                         break 'submit;
                     }
                     Some(WhatToDo::AbortRequest) => return Ok(Some(WhatToDo::AbortRequest)),
@@ -416,7 +453,8 @@ async fn handle_file_fingerprinting(
             let moved_filepath = movedir.path().join(filename);
 
             println!(
-                "Moving '{}' to '{}'",
+                "{} '{}' to '{}'",
+                style("Moving").yellow(),
                 &filepath.display(),
                 &moved_filepath.display()
             );
@@ -453,15 +491,16 @@ async fn handle_file_fingerprinting(
 
                 if !ffmpeg_exit_status.exit_status.success() {
                     match ask_action_on_command_error(
-                        format!(
+                        style(format!(
                             "ffmpeg returned a non-zero exit code: {}",
                             ffmpeg_exit_status.exit_status
-                        ),
+                        ))
+                        .red(),
                         true,
                     )
                     .await?
                     {
-                        WhatToDo::RetryLastCommand => continue 'last_command,
+                        WhatToDo::Retry => continue 'last_command,
                         WhatToDo::RestartRequest => return Ok(Some(WhatToDo::RestartRequest)),
                         WhatToDo::Continue => break 'last_command,
                         WhatToDo::AbortRequest => return Ok(Some(WhatToDo::AbortRequest)),
@@ -472,7 +511,8 @@ async fn handle_file_fingerprinting(
             }
 
             println!(
-                "Copied '{}' to '{}' with updated metadata from MusicBrainz",
+                "{} '{}' to '{}' with updated metadata from MusicBrainz",
+                style("Copied").yellow(),
                 moved_filepath.display(),
                 filepath.display()
             );
@@ -512,10 +552,11 @@ fn fetch_recording_data_from_mbz(
         if entries.is_empty() {
             break 'fetch;
         } else {
-            let retry = dialoguer::Confirm::new()
+            let retry = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!(
-                    "{} MusicBrainz API calls have failed, retry?",
-                    entries.len()
+                    "{} {}, retry?",
+                    style(entries.len()).red(),
+                    style("MusicBrainz API calls have failed").red(),
                 ))
                 .default(true)
                 .show_default(true)
@@ -561,9 +602,9 @@ impl<'e> SelectionTreeLookupResultsEntry<'e> {
             _recording_data: once_cell::unsync::OnceCell::new(),
             entry_display: format!(
                 "Score: {}, AcoustID: {}, Recordings: {}",
-                &entry.score,
+                style(&entry.score).cyan().bold(),
                 &entry.id,
-                entry.recordings.as_ref().unwrap().len()
+                style(entry.recordings.as_ref().unwrap().len()).cyan()
             ),
             _recording_display: once_cell::unsync::OnceCell::new(),
         }
@@ -583,9 +624,9 @@ impl<'e> SelectionTreeLookupResultsEntry<'e> {
                 format!(
                     "https://musicbrainz.org/recording/{}; Title: {}, Disambiguation: {}, Artists: {}",
                     &self.entry.id,
-                    recording.title,
-                    recording.disambiguation.as_ref().map(|s| s as &str).unwrap_or_else(|| ""),
-                    artists_to_string(recording.artist_credit.as_ref().map(|s| s as &[_]).unwrap_or_else(|| &[]))
+                    style(&recording.title).blue(),
+                    style(recording.disambiguation.as_ref().map(|s| s as &str).unwrap_or_else(|| "")).blue(),
+                    style(artists_to_string(recording.artist_credit.as_ref().map(|s| s as &[_]).unwrap_or_else(|| &[]))).blue()
                 )
             }).collect()
         })
@@ -607,11 +648,15 @@ fn get_recording_from_selection_tree(
         .collect();
 
     let ask_top_level = |first_run: bool| {
-        if first_run && results.len() == 1 {
-            println!("Autoselecting {}", results_display[0]);
+        if first_run && results.len() == 1 && results[0].entry.score > 0.95 {
+            println!(
+                "{} {}",
+                style("Autoselecting").magenta(),
+                results_display[0]
+            );
             Some(&results[0])
         } else {
-            dialoguer::Select::new()
+            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .item("<none>")
                 .items(&results_display)
                 .default(0)
@@ -628,11 +673,19 @@ fn get_recording_from_selection_tree(
         let recordings_display = entry.recording_display(&runtime);
 
         if first_run && recordings.len() == 1 {
-            println!("Autoselecting {}", recordings_display[0]);
+            println!(
+                "{} {}",
+                style("Autoselecting").magenta(),
+                recordings_display[0]
+            );
             Some(recordings[0].clone())
         } else {
-            dialoguer::Select::new()
-                .with_prompt(format!("Select <back> to go back to the previous selection. Currently exploring AcoustID: {}", &entry.entry.id))
+            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt(format!(
+                    "{}: {}",
+                    style("Currently exploring AcoustID").italic(),
+                    &entry.entry.id
+                ))
                 .item("<back>")
                 .items(recordings_display)
                 .default(0)
@@ -645,7 +698,8 @@ fn get_recording_from_selection_tree(
     };
 
     println!(
-        "Explore the various associated recordings: Select <none> if none is correct, otherwise, when an option is selected, a nested selection for the correct MusicBrainz recording will appear"
+        "Select correct recording, or {} if none is correct",
+        style("<none>").bold(),
     );
 
     let mut first_run = true;
@@ -658,16 +712,34 @@ fn get_recording_from_selection_tree(
                         continue 'outer;
                     }
                     Some(record) => {
-                        let confirm = dialoguer::Confirm::new()
-                            .with_prompt(format!(
-                                "Confirm recording: https://musicbrainz.org/recording/{}",
-                                &record.id
-                            ))
-                            .default(true)
-                            .show_default(true)
-                            .wait_for_newline(true)
-                            .interact()
-                            .is_ok_and(|r| r);
+                        let empty_string = String::new();
+                        println!(
+                            "\n{}\nRecording: https://musicbrainz.org/recording/{}\nTitle: {}\nDisambiguation: {}\nArtists: {}\n",
+                            style("Selected:").blue().bold(),
+                            &record.id,
+                            style(&record.title).cyan().bold(),
+                            style(&record.disambiguation.as_ref().unwrap_or(&empty_string))
+                                .cyan()
+                                .bold(),
+                            style(
+                                &record
+                                    .artist_credit
+                                    .as_ref()
+                                    .map(artists_to_string)
+                                    .unwrap_or_default()
+                            )
+                            .cyan()
+                            .bold(),
+                        );
+                        let confirm = dialoguer::Confirm::with_theme(
+                            &dialoguer::theme::ColorfulTheme::default(),
+                        )
+                        .with_prompt("Confirm?")
+                        .default(true)
+                        .show_default(true)
+                        .wait_for_newline(true)
+                        .interact()
+                        .is_ok_and(|r| r);
 
                         if confirm {
                             return Some(record.clone());
