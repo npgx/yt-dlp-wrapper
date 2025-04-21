@@ -1,12 +1,16 @@
 use crate::tools::ChromaprintFingerprint;
 use crate::tty::handle_requests::{artists_to_string, ask_action_on_command_error, WhatToDo};
-use crate::tty::TtyArgs;
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use musicbrainz_rs::Fetch;
 use serde::{Deserialize, Serialize};
 use std::iter::FusedIterator;
 use std::time::Duration;
+
+// this is not a secret, it's the API key of the client, which is this program
+// if you're not convinced, here is picard's key:
+// https://github.com/metabrainz/picard/commit/44c83e2ade75ea642a1b5ded7564262d5475977d
+pub(crate) const ACOUSTID_CLIENT_KEY: &str = "bHEqneqDyO";
 
 pub mod response {
     use serde::{Deserialize, Serialize};
@@ -73,7 +77,6 @@ pub async fn submit_fingerprint(
     duration: u64,
     mbid: &str,
     user_api_key: &str,
-    args: &TtyArgs,
 ) -> Result<(Option<WhatToDo>, musicbrainz_rs::entity::recording::Recording), anyhow::Error> {
     let recording = musicbrainz_rs::entity::recording::Recording::fetch()
         .id(mbid)
@@ -84,7 +87,7 @@ pub async fn submit_fingerprint(
     let duration = duration.to_string();
     let mut query = vec![
         ("format", "json"),
-        ("client", &args.acoustid_key),
+        ("client", ACOUSTID_CLIENT_KEY),
         ("clientversion", env!("CARGO_PKG_VERSION")),
         ("user", user_api_key),
         ("duration.0", &duration),
@@ -105,7 +108,7 @@ pub async fn submit_fingerprint(
         .json()
         .await?;
 
-    let maybe_what_to_do = confirm_fingerprint_status(acoustid_client, submission, args).await?;
+    let maybe_what_to_do = confirm_fingerprint_status(acoustid_client, submission).await?;
 
     Ok((maybe_what_to_do, recording))
 }
@@ -190,7 +193,6 @@ pub(crate) struct AcoustIDSubmissionStatusEntryResult {
 pub async fn confirm_fingerprint_status(
     acoustid_client: &mut reqwest::Client,
     submission: AcoustIDSubmission,
-    args: &TtyArgs,
 ) -> Result<Option<WhatToDo>, anyhow::Error> {
     if submission.status != "ok" {
         return Ok(Some(
@@ -229,7 +231,7 @@ pub async fn confirm_fingerprint_status(
             .get("https://api.acoustid.org/v2/submission_status")
             .query(&[
                 ("format", "json"),
-                ("client", &args.acoustid_key),
+                ("client", ACOUSTID_CLIENT_KEY),
                 ("clientversion", env!("CARGO_PKG_VERSION")),
                 ("id", &submission_id_str),
             ])

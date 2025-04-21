@@ -271,7 +271,7 @@ async fn handle_file_fingerprinting(
         acoustid_client,
         &fpcalc_output.fingerprint,
         fpcalc_output.duration.floor() as u64,
-        &args.acoustid_key,
+        acoustid::ACOUSTID_CLIENT_KEY,
     )
     .await?;
 
@@ -391,7 +391,6 @@ async fn handle_file_fingerprinting(
                     fpcalc_output.duration.floor() as u64,
                     &mbid,
                     &acoustid_user_key,
-                    args,
                 )
                 .await?;
 

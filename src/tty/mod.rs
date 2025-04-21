@@ -24,12 +24,6 @@ pub(crate) struct TtyArgs {
     #[arg(long, visible_alias("beet-command"), value_parser = parse_beet, default_value = "beet import -m", help = "beet command to execute. Defaults to 'beet import -m'. '.' will be appended to the command, and the execution directory will be set as the yt-dlp download directory."
     )]
     pub beet: PosixCommand,
-    #[arg(
-        long,
-        visible_alias("acoustid-api-key"),
-        help = "API key that will be used for fingerprint lookup"
-    )]
-    pub acoustid_key: String,
     #[arg(long, default_value = "warning", help = "-loglevel to pass to ffmpeg commands")]
     pub ffmpeg_loglevel: String,
     #[arg(
