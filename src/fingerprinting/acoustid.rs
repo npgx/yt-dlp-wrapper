@@ -1,5 +1,6 @@
-use crate::tools::ChromaprintFingerprint;
-use crate::tty::handle_requests::{artists_to_string, ask_action_on_command_error, WhatToDo};
+use crate::fingerprinting::file::FPCalcJsonOutput;
+use crate::musicbrainz::artists_to_string;
+use crate::user::{ask_what_to_do, WhatToDo};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use musicbrainz_rs::Fetch;
@@ -12,31 +13,31 @@ use std::time::Duration;
 // https://github.com/metabrainz/picard/commit/44c83e2ade75ea642a1b5ded7564262d5475977d
 pub(crate) const ACOUSTID_CLIENT_KEY: &str = "bHEqneqDyO";
 
-pub mod response {
+pub(crate) mod response {
     use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, Clone)]
-    pub struct Lookup {
-        pub status: String,
-        pub results: Option<Vec<LookupResultsEntry>>,
+    pub(crate) struct Lookup {
+        pub(crate) status: String,
+        pub(crate) results: Option<Vec<LookupResultsEntry>>,
     }
 
     #[derive(Serialize, Deserialize, Clone)]
-    pub struct LookupResultsEntry {
-        pub id: String,
-        pub score: f64,
-        pub recordings: Option<Vec<RecordingEntry>>,
+    pub(crate) struct LookupResultsEntry {
+        pub(crate) id: String,
+        pub(crate) score: f64,
+        pub(crate) recordings: Option<Vec<RecordingEntry>>,
     }
 
     #[derive(Serialize, Deserialize, Clone, Debug)]
-    pub struct RecordingEntry {
-        pub id: String,
+    pub(crate) struct RecordingEntry {
+        pub(crate) id: String,
     }
 }
 
-pub async fn lookup_fingerprint(
+pub(crate) async fn lookup_fingerprint(
     client: &mut reqwest::Client,
-    fingerprint: &ChromaprintFingerprint,
+    fingerprint: &str,
     track_duration: u64,
     client_api_key: &str,
 ) -> Result<response::Lookup, anyhow::Error> {
@@ -71,9 +72,9 @@ pub(crate) struct AcoustIDSubmissionEntry {
     status: String,
 }
 
-pub async fn submit_fingerprint(
+pub(crate) async fn submit_fingerprint(
     acoustid_client: &mut reqwest::Client,
-    fingerprint: &ChromaprintFingerprint,
+    fingerprint: &str,
     duration: u64,
     mbid: &str,
     user_api_key: &str,
@@ -119,7 +120,7 @@ struct RepeatLast<I, E> {
 }
 
 impl<I, E: Clone> RepeatLast<I, E> {
-    pub fn new(inner: I) -> Self {
+    pub(crate) fn new(inner: I) -> Self {
         Self { inner, last: None }
     }
 }
@@ -190,13 +191,130 @@ pub(crate) struct AcoustIDSubmissionStatusEntryResult {
     id: String,
 }
 
-pub async fn confirm_fingerprint_status(
+pub(crate) enum FingerprintSubmissionResult {
+    WTD(WhatToDo),
+    Recording(musicbrainz_rs::entity::recording::Recording),
+    Nothing,
+}
+
+pub(crate) async fn handle_fingerprint_submission(
+    acoustid_client: &mut reqwest::Client,
+    fpcalc_output: &FPCalcJsonOutput,
+) -> Result<FingerprintSubmissionResult, anyhow::Error> {
+    use once_cell::sync::OnceCell;
+    use std::borrow::Cow;
+    static ACOUSTID_USER_KEY: OnceCell<String> = OnceCell::new();
+
+    let submit = tokio::task::spawn_blocking(move || {
+        dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+            .with_prompt(format!("{}", style("Would you like to submit the fingerprint?").cyan()))
+            .default(true)
+            .show_default(true)
+            .wait_for_newline(true)
+            .interact()
+    })
+    .await??;
+
+    if submit {
+        'submit: loop {
+            let acoustid_user_key: Cow<str> = if ACOUSTID_USER_KEY.get().is_some() {
+                Cow::Borrowed(ACOUSTID_USER_KEY.get().unwrap())
+            } else {
+                // don't set it asap, set it when the request succeeds
+                'api_key: loop {
+                    let user_input = tokio::task::spawn_blocking(move || {
+                        dialoguer::Input::<String>::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                            .with_prompt("Insert the AcoustID user API key (https://acoustid.org)")
+                            .allow_empty(false)
+                            .report(false)
+                            .interact_text()
+                    })
+                    .await?;
+                    match user_input {
+                        Ok(value) => break 'api_key Cow::Owned(value),
+                        Err(err) => eprintln!("Invalid User Key: {}", err),
+                    }
+                }
+            };
+
+            let mbid = 'mbid: loop {
+                let tmp = tokio::task::spawn_blocking(move || {
+                    dialoguer::Input::<String>::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                        .with_prompt(
+                            "Insert the MusicBrainz RECORDING ID that you would like to bind to the fingerprint",
+                        )
+                        .allow_empty(false)
+                        .report(true)
+                        .interact_text()
+                })
+                .await?;
+                match tmp {
+                    Ok(value) => {
+                        let value2 = value.clone();
+                        let confirm = tokio::task::spawn_blocking(move || {
+                            dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                                .with_prompt(format!(
+                                    "{}: {}",
+                                    style("Confirm MusicBrainz RECORDING ID").green(),
+                                    value2
+                                ))
+                                .default(true)
+                                .show_default(true)
+                                .wait_for_newline(true)
+                                .interact()
+                        })
+                        .await??;
+
+                        if confirm {
+                            break 'mbid value;
+                        } else {
+                            continue 'mbid;
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("{}: {}", style("Invalid Record ID").for_stderr().red(), err)
+                    }
+                }
+            };
+
+            let (what_to_do, recording) = submit_fingerprint(
+                acoustid_client,
+                &fpcalc_output.fingerprint,
+                fpcalc_output.duration.floor() as u64,
+                &mbid,
+                &acoustid_user_key,
+            )
+            .await?;
+
+            match what_to_do {
+                Some(WhatToDo::Retry) => continue 'submit,
+                Some(WhatToDo::RestartRequest) => return Ok(FingerprintSubmissionResult::WTD(WhatToDo::AbortRequest)),
+                None => {
+                    println!(
+                        "{}",
+                        style("Persisting AcoustID User Key (for current session)").magenta()
+                    );
+                    ACOUSTID_USER_KEY.get_or_init(|| acoustid_user_key.into_owned());
+                    return Ok(FingerprintSubmissionResult::Recording(recording));
+                }
+                Some(WhatToDo::Continue) => {
+                    return Ok(FingerprintSubmissionResult::Recording(recording));
+                }
+                Some(WhatToDo::AbortRequest) => return Ok(FingerprintSubmissionResult::WTD(WhatToDo::AbortRequest)),
+            }
+        }
+    }
+
+    Ok(FingerprintSubmissionResult::Nothing)
+}
+
+pub(crate) async fn confirm_fingerprint_status(
     acoustid_client: &mut reqwest::Client,
     submission: AcoustIDSubmission,
 ) -> Result<Option<WhatToDo>, anyhow::Error> {
     if submission.status != "ok" {
         return Ok(Some(
-            ask_action_on_command_error(
+            ask_what_to_do(
                 style(format!("AcoustID returned submission status {}.", submission.status)).red(),
                 WhatToDo::all(),
             )
@@ -242,7 +360,7 @@ pub async fn confirm_fingerprint_status(
 
         if submission_status.status != "ok" {
             if iteration > 3 {
-                let what_to_do = ask_action_on_command_error(
+                let what_to_do = ask_what_to_do(
                     style("AcoustID server keeps sending failed status response.".to_string()).red(),
                     WhatToDo::all(),
                 )
@@ -266,7 +384,7 @@ pub async fn confirm_fingerprint_status(
 
         if entry_status.status != "imported" {
             if iteration > 4 {
-                let what_to_do = ask_action_on_command_error(
+                let what_to_do = ask_what_to_do(
                     style("AcoustID server keep sending not-'imported' submission status.".to_string()).red(),
                     WhatToDo::all(),
                 )

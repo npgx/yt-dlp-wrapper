@@ -10,7 +10,7 @@ pub(crate) struct RequestArgs {
         long,
         help = "Youtube url to use for creating the video request. Supports the majority of modern youtube urls (will extract the ID)."
     )]
-    pub yt_url: String,
+    pub(crate) yt_url: String,
 }
 
 pub(crate) async fn run(args: RequestArgs) -> Result<(), anyhow::Error> {

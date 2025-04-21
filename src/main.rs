@@ -1,26 +1,16 @@
-mod lock;
-mod request;
-mod tty;
-mod video;
+pub(crate) mod cli;
+pub(crate) mod fingerprinting;
+pub(crate) mod lock;
+pub(crate) mod musicbrainz;
+pub(crate) mod net;
+pub(crate) mod process;
+pub(crate) mod request;
+pub(crate) mod signals;
+pub(crate) mod tty;
+pub(crate) mod user;
+pub(crate) mod video;
 
-pub(crate) mod tools;
-
-use clap::Parser;
-
-#[derive(clap::Parser, Debug)]
-#[command(version, about, long_about = None, arg_required_else_help(true))]
-pub(crate) struct CliArgs {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(clap::Subcommand, Debug)]
-pub(crate) enum Command {
-    #[command(about = "Start the tty session that will handle the video requests")]
-    Tty(tty::TtyArgs),
-    #[command(about = "Send a video request to the daemon")]
-    Request(request::RequestArgs),
-}
+use cli::{CliArgs, Command, Parser};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
