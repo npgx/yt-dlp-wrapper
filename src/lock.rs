@@ -32,9 +32,7 @@ pub(crate) async fn get_lock() -> Result<fd_lock::RwLock<File>, std::io::Error> 
     Ok(lock)
 }
 
-pub(crate) async fn write_pid<'lock>(
-    guard: &mut fd_lock::RwLockWriteGuard<'lock, File>,
-) -> Result<(), std::io::Error> {
+pub(crate) async fn write_pid<'lock>(guard: &mut fd_lock::RwLockWriteGuard<'lock, File>) -> Result<(), std::io::Error> {
     let pid = std::process::id();
     guard.set_len(0).await?;
     guard.rewind().await?;

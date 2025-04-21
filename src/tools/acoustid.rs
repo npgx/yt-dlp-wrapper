@@ -74,13 +74,7 @@ pub async fn submit_fingerprint(
     mbid: &str,
     user_api_key: &str,
     args: &TtyArgs,
-) -> Result<
-    (
-        Option<WhatToDo>,
-        musicbrainz_rs::entity::recording::Recording,
-    ),
-    anyhow::Error,
-> {
+) -> Result<(Option<WhatToDo>, musicbrainz_rs::entity::recording::Recording), anyhow::Error> {
     let recording = musicbrainz_rs::entity::recording::Recording::fetch()
         .id(mbid)
         .with_artists()
@@ -201,12 +195,8 @@ pub async fn confirm_fingerprint_status(
     if submission.status != "ok" {
         return Ok(Some(
             ask_action_on_command_error(
-                style(format!(
-                    "AcoustID returned submission status {}.",
-                    submission.status
-                ))
-                .red(),
-                true,
+                style(format!("AcoustID returned submission status {}.", submission.status)).red(),
+                WhatToDo::all(),
             )
             .await?,
         ));
@@ -218,10 +208,7 @@ pub async fn confirm_fingerprint_status(
 
         let bar = ProgressBar::new(wait_time * MULTIPLIER);
         bar.set_style(ProgressStyle::with_template("[{msg}] {wide_bar} {pos}/{len}").unwrap());
-        bar.set_message(format!(
-            "Waiting {} seconds to get submit status...",
-            wait_time
-        ));
+        bar.set_message(format!("Waiting {} seconds to get submit status...", wait_time));
         for _ in 0..(wait_time * MULTIPLIER) {
             // this is *good enough*
             tokio::time::sleep(Duration::from_millis(INTERVAL)).await;
@@ -254,9 +241,8 @@ pub async fn confirm_fingerprint_status(
         if submission_status.status != "ok" {
             if iteration > 3 {
                 let what_to_do = ask_action_on_command_error(
-                    style("AcoustID server keeps sending failed status response.".to_string())
-                        .red(),
-                    true,
+                    style("AcoustID server keeps sending failed status response.".to_string()).red(),
+                    WhatToDo::all(),
                 )
                 .await?;
 
@@ -279,12 +265,8 @@ pub async fn confirm_fingerprint_status(
         if entry_status.status != "imported" {
             if iteration > 4 {
                 let what_to_do = ask_action_on_command_error(
-                    style(
-                        "AcoustID server keep sending not-'imported' submission status."
-                            .to_string(),
-                    )
-                    .red(),
-                    true,
+                    style("AcoustID server keep sending not-'imported' submission status.".to_string()).red(),
+                    WhatToDo::all(),
                 )
                 .await?;
 
@@ -319,10 +301,7 @@ pub async fn confirm_fingerprint_status(
     // just to let user read
     let _ignore: String = tokio::task::spawn_blocking(move || {
         dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
-            .with_prompt(format!(
-                "Press {} to continue...",
-                style("Enter").bold().cyan()
-            ))
+            .with_prompt(format!("Press {} to continue...", style("Enter").bold().cyan()))
             .allow_empty(true)
             .show_default(false)
             .report(false)

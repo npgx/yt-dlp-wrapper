@@ -1,7 +1,7 @@
 pub(crate) mod handle_requests;
 
 use crate::lock;
-use crate::tty::handle_requests::ExitStatusExt;
+use crate::tty::handle_requests::{ask_action_on_command_error, ExitStatusExt, WhatToDo};
 use crate::video::VideoRequest;
 use axum::response::Response;
 use axum::routing::post;
@@ -10,15 +10,19 @@ use console::style;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 use std::path::Path;
+use std::process::exit;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::sync::mpsc::error::TrySendError;
 use tower::ServiceBuilder;
 
 #[derive(clap::Args, Debug, Clone)]
 pub(crate) struct TtyArgs {
-    #[arg(long, visible_alias("yt-dlp-command"), value_parser = parse_yt_dlp, help = "yt-dlp command to execute. NOTE: '--' will automatically be appended to this. NOTE: each command chain will execute in a different temporary directory.")]
+    #[arg(long, visible_alias("yt-dlp-command"), value_parser = parse_yt_dlp, help = "yt-dlp command to execute. NOTE: '--' will automatically be appended to this. NOTE: each command chain will execute in a different temporary directory."
+    )]
     pub yt_dlp: PosixCommand,
-    #[arg(long, visible_alias("beet-command"), value_parser = parse_beet, default_value = "beet import -m", help = "beet command to execute. Defaults to 'beet import -m'. '.' will be appended to the command, and the execution directory will be set as the yt-dlp download directory.")]
+    #[arg(long, visible_alias("beet-command"), value_parser = parse_beet, default_value = "beet import -m", help = "beet command to execute. Defaults to 'beet import -m'. '.' will be appended to the command, and the execution directory will be set as the yt-dlp download directory."
+    )]
     pub beet: PosixCommand,
     #[arg(
         long,
@@ -26,11 +30,7 @@ pub(crate) struct TtyArgs {
         help = "API key that will be used for fingerprint lookup"
     )]
     pub acoustid_key: String,
-    #[arg(
-        long,
-        default_value = "warning",
-        help = "-loglevel to pass to ffmpeg commands"
-    )]
+    #[arg(long, default_value = "warning", help = "-loglevel to pass to ffmpeg commands")]
     pub ffmpeg_loglevel: String,
     #[arg(
         long,
@@ -39,7 +39,8 @@ pub(crate) struct TtyArgs {
         help = "maximum amount of video requests that can be enqueued by request instances (this does not include the request currently being processed). Defaults to 16, will be coerced between 1 and 128 inclusive"
     )]
     pub max_requests: usize,
-    #[arg(long, default_value = "never", value_parser = parse_prompt_flag, help = "Valid values: 'never', 'always', 'ask', defaults to never. It controls whether or not to keep the tmp directory where the commands are executed")]
+    #[arg(long, default_value = "never", value_parser = parse_prompt_flag, help = "Valid values: 'never', 'always', 'ask', defaults to never. It controls whether or not to keep the tmp directory where the commands are executed"
+    )]
     pub keep_tmp: PromptFlag,
 }
 
@@ -109,10 +110,33 @@ pub(crate) struct TtyState {
     pub vreq_sender: tokio::sync::mpsc::Sender<VideoRequest>,
 }
 
+// see inside run
+static CTRLC: AtomicBool = AtomicBool::new(false);
+
+pub(crate) async fn check_ctrlc() -> Option<WhatToDo> {
+    match CTRLC.compare_exchange(
+        true,
+        false,
+        core::sync::atomic::Ordering::SeqCst,
+        core::sync::atomic::Ordering::SeqCst,
+    ) {
+        Ok(_) => {
+            // CTRL-C was used
+            Some(
+                ask_action_on_command_error(style("".to_string()).red(), WhatToDo::all_except(WhatToDo::Retry))
+                    .await
+                    .unwrap(),
+            )
+        }
+        Err(_) => {
+            // nothing to do
+            None
+        }
+    }
+}
+
 pub(crate) async fn run(args: TtyArgs) {
-    let mut lock = lock::get_lock()
-        .await
-        .expect("Failed to create lock to lockfile");
+    let mut lock = lock::get_lock().await.expect("Failed to create lock to lockfile");
     let mut guard = lock
         .try_write()
         .expect("Failed to acquire lock guard, is another daemon instance already running?");
@@ -144,6 +168,24 @@ pub(crate) async fn run(args: TtyArgs) {
     );
 
     tokio::spawn(async move {
+        loop {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to register CTRL-C handler");
+
+            match CTRLC.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                true => {
+                    // called CTRL-C two times quickly or while it was being handled, kill the program
+                    exit(2)
+                }
+                false => {
+                    // handle it in the code at the earliest convenience
+                }
+            }
+        }
+    });
+
+    tokio::spawn(async move {
         let mut acoustid_client = reqwest::Client::builder()
             .connector_layer(
                 ServiceBuilder::new()
@@ -156,8 +198,7 @@ pub(crate) async fn run(args: TtyArgs) {
             .expect("Could not initialize acoust_id reqwest client.");
 
         while let Some(vreq) = rx.recv().await {
-            let result =
-                handle_requests::handle_video_request(vreq, &args, &mut acoustid_client).await;
+            let result = handle_requests::handle_video_request(vreq, &args, &mut acoustid_client).await;
 
             match result {
                 Ok(true) => {}
@@ -218,19 +259,14 @@ pub(crate) struct WithExitStatus<T> {
     pub data: T,
 }
 
-pub(crate) async fn wait_for_cmd(
-    mut child: tokio::process::Child,
-) -> Result<WithExitStatus<()>, std::io::Error> {
+pub(crate) async fn wait_for_cmd(mut child: tokio::process::Child) -> Result<WithExitStatus<()>, std::io::Error> {
     child.wait().await.map(|status| status.with_unit())
 }
 
 pub(crate) async fn wait_for_cmd_output(
     child: tokio::process::Child,
 ) -> Result<WithExitStatus<std::process::Output>, std::io::Error> {
-    child
-        .wait_with_output()
-        .await
-        .map(|output| output.status.with(output))
+    child.wait_with_output().await.map(|output| output.status.with(output))
 }
 
 pub(crate) async fn wrap_command_print_context<T, Ex, FT, FTErr>(
@@ -284,10 +320,7 @@ where
             .green()
         );
     } else if let Some(err_code) = result.exit_status.code() {
-        println!(
-            "{}",
-            style(format!("Command returned exit code {}.", err_code)).red()
-        );
+        println!("{}", style(format!("Command returned exit code {}.", err_code)).red());
     } else {
         println!("{}", style("Command was terminated by signal.").red());
     }

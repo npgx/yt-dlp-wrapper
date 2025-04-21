@@ -32,12 +32,8 @@ pub async fn fingerprint_file(
 
         if !output.exit_status.success() {
             match tty::handle_requests::ask_action_on_command_error(
-                style(format!(
-                    "fpcalc returned a non-zero exit code: {}",
-                    output.exit_status
-                ))
-                .red(),
-                false,
+                style(format!("fpcalc returned a non-zero exit code: {}", output.exit_status)).red(),
+                WhatToDo::all_except(WhatToDo::Continue),
             )
             .await?
             {
