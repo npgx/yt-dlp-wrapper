@@ -23,7 +23,7 @@ where
 {
     // shouldn't, but might, have duplicates
     let mbids = mbids.as_ref();
-    
+
     // Option<Arc<_>> lets us check if we're all done below,
     // without having to check if all elements in mbids are in the cache
     let mut cache =
@@ -52,7 +52,9 @@ where
             }
         }
 
-        if cache.values().any(Option::is_none) {
+        if cache.values().all(Option::is_some) {
+            break 'interact;
+        } else {
             let retry = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!(
                     "{} {}, retry?",
