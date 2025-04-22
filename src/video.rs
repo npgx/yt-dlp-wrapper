@@ -134,8 +134,6 @@ pub(crate) async fn process_video_request(
                 fingerprinting::file::handle_fingerprinting_process_for_directory(work_dir_path, acoustid_client, args)
                     .await?;
 
-            handle_ctrlc!(restart: { continue 'request }, abort: { break 'request Ok(false) });
-
             double_loop_what_to_do_opt!(what_to_do, 'request, 'fingerprinting, Ok(false), none: { break 'fingerprinting });
         }
 
