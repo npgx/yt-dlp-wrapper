@@ -108,7 +108,7 @@ mod tree {
             })
             .await?;
 
-            Ok(selected.map(|index| &results[index]))
+            Ok(selected.map(|index| &results[index - 1]))
         }
     }
 
@@ -137,7 +137,7 @@ mod tree {
             })
             .await?;
 
-            Ok(selected.map(|index| recordings[index].clone()))
+            Ok(selected.map(|index| recordings[index - 1].clone()))
         }
     }
 }
