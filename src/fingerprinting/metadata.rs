@@ -1,5 +1,5 @@
 use crate::user::WhatToDo;
-use crate::{cli, handle_what_to_do, musicbrainz, process, user};
+use crate::{cli, handle_what_to_do, musicbrainz, process};
 use console::style;
 use std::path::Path;
 use std::sync::Arc;
@@ -43,30 +43,29 @@ pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
     ];
 
     'last_command: loop {
-        let ffmpeg_exit_status =
-            process::wrap_command_print_context(&ffmpeg_cmd, movedir.path(), |cmd| cmd, process::wait_for_child)
+        let ffmpeg_command_execution =
+            process::handle_child_command_execution(&ffmpeg_cmd, movedir.path(), |cmd| cmd, process::wait_for_child)
+                .await?
+                .into_success_or_ask_wtd(|status, _unit| {
+                    let message = format!("ffmpeg returned a non-zero exit code: {}", status);
+
+                    (style(message).red(), WhatToDo::all())
+                })
                 .await?;
 
-        if !ffmpeg_exit_status.exit_status.success() {
-            let what_to_do = user::ask_what_to_do(
-                style(format!(
-                    "ffmpeg returned a non-zero exit code: {}",
-                    ffmpeg_exit_status.exit_status
-                ))
-                .red(),
-                WhatToDo::all(),
-            )
-            .await?;
-
-            handle_what_to_do!(what_to_do, [
-                retry: { continue 'last_command },
-                restart: { return Ok(Some(WhatToDo::RestartRequest)) },
-                cont: { break 'last_command },
-                abort: { return Ok(Some(WhatToDo::AbortRequest)) }
-            ]);
+        match ffmpeg_command_execution {
+            Ok(_unit) => {
+                break 'last_command;
+            }
+            Err(what_to_do) => {
+                handle_what_to_do!(what_to_do, [
+                    retry: { continue 'last_command },
+                    restart: { return Ok(Some(WhatToDo::RestartRequest)) },
+                    cont: { break 'last_command },
+                    abort: { return Ok(Some(WhatToDo::AbortRequest)) }
+                ]);
+            }
         }
-
-        break 'last_command;
     }
 
     println!(

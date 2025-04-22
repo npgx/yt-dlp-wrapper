@@ -2,7 +2,7 @@ use crate::fingerprinting::file::FPCalcJsonOutput;
 use crate::musicbrainz::artists_to_string;
 use crate::user::{ask_what_to_do, WhatToDo};
 use crate::utils::iters::IntoRepeatLast;
-use crate::{handle_what_to_do, musicbrainz};
+use crate::{handle_ctrlc, handle_what_to_do, musicbrainz};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,8 @@ pub(crate) async fn submit_fingerprint(
 ) -> Result<(Option<WhatToDo>, Arc<musicbrainz_rs::entity::recording::Recording>), anyhow::Error> {
     let recording = musicbrainz::fetch_recording_data(mbid).await?;
 
+    handle_ctrlc!(restart: { return Ok((Some(WhatToDo::RestartRequest), recording)) }, abort: { return Ok((Some(WhatToDo::AbortRequest), recording)) });
+
     let duration = duration.to_string();
     let mut query = vec![
         ("format", "json"),
@@ -105,6 +107,8 @@ pub(crate) async fn submit_fingerprint(
         .await?
         .json()
         .await?;
+
+    handle_ctrlc!(restart: { return Ok((Some(WhatToDo::RestartRequest), recording)) }, abort: { return Ok((Some(WhatToDo::AbortRequest), recording)) });
 
     let maybe_what_to_do = confirm_fingerprint_status(acoustid_client, submission).await?;
 
@@ -131,7 +135,7 @@ pub(crate) struct AcoustIDSubmissionStatusEntryResult {
 
 #[derive(Clone, Debug)]
 pub(crate) enum FingerprintSubmissionResult {
-    WTD(WhatToDo),
+    Wtd(WhatToDo),
     Recording(Arc<musicbrainz_rs::entity::recording::Recording>),
     Nothing,
 }
@@ -154,6 +158,11 @@ pub(crate) async fn handle_fingerprint_submission(
     })
     .await??;
 
+    handle_ctrlc!(
+        restart: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::RestartRequest)) },
+        abort: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)) }
+    );
+
     if submit {
         'submit: loop {
             let acoustid_user_key: Cow<str> = if ACOUSTID_USER_KEY.get().is_some() {
@@ -169,6 +178,12 @@ pub(crate) async fn handle_fingerprint_submission(
                             .interact_text()
                     })
                     .await?;
+
+                    handle_ctrlc!(
+                        restart: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::RestartRequest)) },
+                        abort: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)) }
+                    );
+
                     match user_input {
                         Ok(value) => break 'api_key Cow::Owned(value),
                         Err(err) => eprintln!("Invalid User Key: {}", err),
@@ -177,7 +192,7 @@ pub(crate) async fn handle_fingerprint_submission(
             };
 
             let mbid = 'mbid: loop {
-                let tmp = tokio::task::spawn_blocking(move || {
+                let maybe_mbid = tokio::task::spawn_blocking(move || {
                     dialoguer::Input::<String>::with_theme(&dialoguer::theme::ColorfulTheme::default())
                         .with_prompt(
                             "Insert the MusicBrainz RECORDING ID that you would like to bind to the fingerprint",
@@ -187,7 +202,13 @@ pub(crate) async fn handle_fingerprint_submission(
                         .interact_text()
                 })
                 .await?;
-                match tmp {
+
+                handle_ctrlc!(
+                    restart: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::RestartRequest)) },
+                    abort: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)) }
+                );
+
+                match maybe_mbid {
                     Ok(value) => {
                         let value2 = value.clone();
                         let confirm = tokio::task::spawn_blocking(move || {
@@ -204,6 +225,11 @@ pub(crate) async fn handle_fingerprint_submission(
                         })
                         .await??;
 
+                        handle_ctrlc!(
+                            restart: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::RestartRequest)) },
+                            abort: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)) }
+                        );
+
                         if confirm {
                             break 'mbid value;
                         } else {
@@ -211,7 +237,12 @@ pub(crate) async fn handle_fingerprint_submission(
                         }
                     }
                     Err(err) => {
-                        eprintln!("{}: {}", style("Invalid Record ID").for_stderr().red(), err)
+                        eprintln!("{}: {}", style("Invalid Record ID").for_stderr().red(), err);
+
+                        handle_ctrlc!(
+                            restart: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::RestartRequest)) },
+                            abort: { return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)) }
+                        );
                     }
                 }
             };
@@ -225,10 +256,12 @@ pub(crate) async fn handle_fingerprint_submission(
             )
             .await?;
 
-            // too much stuff to use macro here
+            // don't use macro here
             match what_to_do {
                 Some(WhatToDo::Retry) => continue 'submit,
-                Some(WhatToDo::RestartRequest) => return Ok(FingerprintSubmissionResult::WTD(WhatToDo::AbortRequest)),
+                Some(WhatToDo::RestartRequest) => return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)),
+                Some(WhatToDo::Continue) => return Ok(FingerprintSubmissionResult::Recording(recording)),
+                Some(WhatToDo::AbortRequest) => return Ok(FingerprintSubmissionResult::Wtd(WhatToDo::AbortRequest)),
                 None => {
                     println!(
                         "{}",
@@ -237,10 +270,6 @@ pub(crate) async fn handle_fingerprint_submission(
                     ACOUSTID_USER_KEY.get_or_init(|| acoustid_user_key.into_owned());
                     return Ok(FingerprintSubmissionResult::Recording(recording));
                 }
-                Some(WhatToDo::Continue) => {
-                    return Ok(FingerprintSubmissionResult::Recording(recording));
-                }
-                Some(WhatToDo::AbortRequest) => return Ok(FingerprintSubmissionResult::WTD(WhatToDo::AbortRequest)),
             }
         }
     }
@@ -268,7 +297,7 @@ pub(crate) async fn confirm_fingerprint_status(
 
         let bar = ProgressBar::new(wait_time * MULTIPLIER);
         bar.set_style(ProgressStyle::with_template("[{msg}] {wide_bar} {pos}/{len}").unwrap());
-        bar.set_message(format!("Waiting {} seconds to get submit status...", wait_time));
+        bar.set_message(format!("Waiting {} seconds to get submission status...", wait_time));
         for _ in 0..(wait_time * MULTIPLIER) {
             // this is *good enough*
             tokio::time::sleep(Duration::from_millis(INTERVAL)).await;
@@ -282,8 +311,12 @@ pub(crate) async fn confirm_fingerprint_status(
     let submission_id = submission.submissions.as_ref().unwrap()[0].id;
     let submission_id_str = submission_id.to_string();
     let submission_acoustid_id = 'request_loop: loop {
+        handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
+
         let (iteration, wait_time) = wait_times.next().unwrap();
         wait(wait_time).await;
+
+        handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
         let submission_status: AcoustIDSubmissionStatus = acoustid_client
             .get("https://api.acoustid.org/v2/submission_status")
@@ -357,6 +390,8 @@ pub(crate) async fn confirm_fingerprint_status(
         ))
         .green()
     );
+
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
     // just to let the user read
     let _ignore: String = tokio::task::spawn_blocking(move || {

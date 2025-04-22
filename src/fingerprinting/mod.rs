@@ -4,10 +4,8 @@ pub(crate) mod metadata;
 
 use crate::fingerprinting::acoustid::response::LookupResultsEntry;
 use crate::musicbrainz;
-use crate::process::WithExitStatus;
 use console::style;
 use std::future::ready;
-use std::process::ExitStatus;
 use std::sync::Arc;
 
 struct SelectionTreeLookupResultsEntry<'lre> {
@@ -91,7 +89,7 @@ mod tree {
 
     pub(super) async fn ask_top_level<'lre>(
         first_run: bool,
-        results: &'lre Vec<SelectionTreeLookupResultsEntry<'lre>>,
+        results: &'lre [SelectionTreeLookupResultsEntry<'lre>],
         results_display: Arc<Vec<String>>,
     ) -> Result<Option<&'lre SelectionTreeLookupResultsEntry<'lre>>, tokio::task::JoinError> {
         if first_run && results.len() == 1 && results[0].entry.score > 0.95 {
@@ -147,10 +145,8 @@ mod tree {
 async fn get_recording_from_selection_tree(
     results: &[LookupResultsEntry],
 ) -> Result<Option<Arc<musicbrainz_rs::entity::recording::Recording>>, anyhow::Error> {
-    let results: Vec<SelectionTreeLookupResultsEntry> = results
-        .iter()
-        .map(|entry| SelectionTreeLookupResultsEntry::new(entry))
-        .collect();
+    let results: Vec<SelectionTreeLookupResultsEntry> =
+        results.iter().map(SelectionTreeLookupResultsEntry::new).collect();
 
     let results_display: Arc<Vec<String>> = Arc::new(
         results
@@ -168,7 +164,7 @@ async fn get_recording_from_selection_tree(
     'outer: loop {
         match tree::ask_top_level(first_run, &results, results_display.clone()).await? {
             Some(entry) => 'inner: loop {
-                match tree::ask_results(first_run, &entry).await? {
+                match tree::ask_results(first_run, entry).await? {
                     None => {
                         first_run = false;
                         continue 'outer;
@@ -214,27 +210,6 @@ async fn get_recording_from_selection_tree(
                 }
             },
             None => return Ok(None),
-        }
-    }
-}
-
-pub(crate) trait ExitStatusExt {
-    fn with<T>(self, data: T) -> WithExitStatus<T>;
-    fn with_unit(self) -> WithExitStatus<()>;
-}
-
-impl ExitStatusExt for ExitStatus {
-    fn with<T>(self, data: T) -> WithExitStatus<T> {
-        WithExitStatus {
-            exit_status: self,
-            data,
-        }
-    }
-
-    fn with_unit(self) -> WithExitStatus<()> {
-        WithExitStatus {
-            exit_status: self,
-            data: (),
         }
     }
 }

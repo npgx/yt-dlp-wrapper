@@ -1,6 +1,5 @@
-use crate::signals::check_ctrlc;
-use crate::user::{ask_what_to_do, WhatToDo};
-use crate::{cli, double_loop_what_to_do, double_loop_what_to_do_opt, fingerprinting, process};
+use crate::user::WhatToDo;
+use crate::{cli, double_loop_what_to_do, double_loop_what_to_do_opt, fingerprinting, handle_ctrlc, process};
 use console::style;
 use std::time::Duration;
 use url::Url;
@@ -86,12 +85,12 @@ pub(crate) async fn spawn_video_request_handler(
     });
 }
 
-pub(crate) type DidRun = bool;
+pub(crate) type RanToCompletion = bool;
 pub(crate) async fn process_video_request(
     request: VideoRequest,
     args: &cli::TtyArgs,
     acoustid_client: &mut reqwest::Client,
-) -> Result<DidRun, anyhow::Error> {
+) -> Result<RanToCompletion, anyhow::Error> {
     'request: loop {
         println!("Processing request for {}", &request.youtube_id);
 
@@ -106,35 +105,35 @@ pub(crate) async fn process_video_request(
         ytdlp_cmd.push(&request.youtube_id);
 
         'last_command: loop {
-            let yt_dlp_exit_status =
-                process::wrap_command_print_context(&ytdlp_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
+            let yt_dlp_command_execution =
+                process::handle_child_command_execution(&ytdlp_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
+                    .await?
+                    .into_success_or_ask_wtd(|status, _unit| {
+                        let message = format!("yt-dlp returned a non-zero exit code: {}", status);
+
+                        (style(message).red(), WhatToDo::all())
+                    })
                     .await?;
 
-            double_loop_what_to_do_opt!(check_ctrlc().await, 'request, 'last_command, Ok(false), none: {});
-
-            if !yt_dlp_exit_status.exit_status.success() {
-                let what_to_do = ask_what_to_do(
-                    style(format!(
-                        "yt-dlp returned a non-zero exit code: {}",
-                        yt_dlp_exit_status.exit_status
-                    ))
-                    .red(),
-                    WhatToDo::all(),
-                )
-                .await?;
-
-                double_loop_what_to_do!(what_to_do, 'request, 'last_command, Ok(false));
+            match yt_dlp_command_execution {
+                Ok(_unit) => {
+                    break 'last_command;
+                }
+                Err(what_to_do) => {
+                    double_loop_what_to_do!(what_to_do, 'request, 'last_command, Ok(false));
+                }
             }
-
-            break 'last_command;
         }
 
-        'last_command: loop {
+        'fingerprinting: loop {
+            handle_ctrlc!(restart: { continue 'request }, abort: { break 'request Ok(false) });
             let what_to_do =
                 fingerprinting::file::handle_fingerprinting_process_for_directory(work_dir_path, acoustid_client, args)
                     .await?;
 
-            double_loop_what_to_do_opt!(what_to_do, 'request, 'last_command, Ok(false), none: { break 'last_command });
+            handle_ctrlc!(restart: { continue 'request }, abort: { break 'request Ok(false) });
+
+            double_loop_what_to_do_opt!(what_to_do, 'request, 'fingerprinting, Ok(false), none: { break 'fingerprinting });
         }
 
         let mut beet_cmd: Vec<&str> = Vec::with_capacity(args.beet.components.len());
@@ -143,25 +142,23 @@ pub(crate) async fn process_video_request(
         }
         beet_cmd.push(".");
         'last_command: loop {
-            let beet_exit_status =
-                process::wrap_command_print_context(&beet_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
+            let beet_command_execution =
+                process::handle_child_command_execution(&beet_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
+                    .await?
+                    .into_success_or_ask_wtd(|status, _unit| {
+                        let message = format!("beet returned a non-zero exit code: {}", status);
+                        (style(message).red(), WhatToDo::all())
+                    })
                     .await?;
 
-            if !beet_exit_status.exit_status.success() {
-                let what_to_do = ask_what_to_do(
-                    style(format!(
-                        "beet returned a non-zero exit code: {}",
-                        beet_exit_status.exit_status
-                    ))
-                    .red(),
-                    WhatToDo::all(),
-                )
-                .await?;
-
-                double_loop_what_to_do!(what_to_do, 'request, 'last_command, Ok(false));
+            match beet_command_execution {
+                Ok(_unit) => {
+                    break 'last_command;
+                }
+                Err(what_to_do) => {
+                    double_loop_what_to_do!(what_to_do, 'request, 'last_command, Ok(false));
+                }
             }
-
-            break 'last_command;
         }
 
         let do_keep_tempdir = match args.keep_tmp {
@@ -184,6 +181,8 @@ pub(crate) async fn process_video_request(
                 .await??
             }
         };
+
+        handle_ctrlc!(restart: { continue 'request }, abort: { break 'request Ok(false) });
 
         if do_keep_tempdir {
             let work_dir = work_dir.into_path();

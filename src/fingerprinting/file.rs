@@ -1,7 +1,7 @@
 use crate::fingerprinting::acoustid;
 use crate::fingerprinting::acoustid::FingerprintSubmissionResult;
 use crate::user::WhatToDo;
-use crate::{cli, fingerprinting, process};
+use crate::{cli, fingerprinting, handle_ctrlc, handle_what_to_do, process};
 use console::style;
 use std::path::Path;
 
@@ -44,6 +44,8 @@ pub(crate) async fn handle_fingerprinting_process_for_directory(
     })
     .await??;
 
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
+
     // is <none> selected
     if selections.contains(&0) {
         println!(
@@ -73,10 +75,14 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
     acoustid_client: &mut reqwest::Client,
     args: &cli::TtyArgs,
 ) -> Result<Option<WhatToDo>, anyhow::Error> {
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
+
     let fpcalc_output = match fingerprint_filepath(filepath).await? {
         Ok(data) => data,
         Err(todo) => return Ok(Some(todo)),
     };
+
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
     let fingerprint_lookup = acoustid::lookup_fingerprint(
         acoustid_client,
@@ -85,6 +91,8 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
         acoustid::ACOUSTID_CLIENT_KEY,
     )
     .await?;
+
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
     if fingerprint_lookup.status != "ok" {
         return Err(anyhow::anyhow!(
@@ -117,9 +125,11 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
         fingerprinting::get_recording_from_selection_tree(&results_with_recordings).await?
     };
 
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
+
     if selection.is_none() {
         match acoustid::handle_fingerprint_submission(acoustid_client, &fpcalc_output).await? {
-            FingerprintSubmissionResult::WTD(what_to_do) => return Ok(Some(what_to_do)),
+            FingerprintSubmissionResult::Wtd(what_to_do) => return Ok(Some(what_to_do)),
             FingerprintSubmissionResult::Recording(recording) => {
                 selection.replace(recording);
             }
@@ -128,6 +138,8 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
             }
         };
     }
+
+    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
     match selection {
         None => Ok(None),
@@ -152,7 +164,7 @@ pub(crate) async fn fingerprint_filepath(path: &Path) -> Result<Result<FPCalcJso
     let output = 'last_command: loop {
         use std::process::Stdio;
 
-        let output = process::wrap_command_print_context(
+        let ffmpeg_command_execution = process::handle_child_command_execution(
             &fpcalc_cmd,
             path.parent().unwrap(),
             |mut cmd| {
@@ -162,23 +174,27 @@ pub(crate) async fn fingerprint_filepath(path: &Path) -> Result<Result<FPCalcJso
             },
             process::wait_for_child_output,
         )
+        .await?
+        .into_success_or_ask_wtd(|status, _output| {
+            let message = format!("fpcalc returned a non-zero exit code: {}", status);
+
+            (style(message).red(), WhatToDo::all_except(WhatToDo::Continue))
+        })
         .await?;
 
-        if !output.exit_status.success() {
-            match crate::user::ask_what_to_do(
-                style(format!("fpcalc returned a non-zero exit code: {}", output.exit_status)).red(),
-                WhatToDo::all_except(WhatToDo::Continue),
-            )
-            .await?
-            {
-                WhatToDo::Retry => continue 'last_command,
-                WhatToDo::Continue => panic!(),
-                WhatToDo::RestartRequest => return Ok(Err(WhatToDo::RestartRequest)),
-                WhatToDo::AbortRequest => return Ok(Err(WhatToDo::AbortRequest)),
+        match ffmpeg_command_execution {
+            Ok(output) => {
+                break 'last_command output;
+            }
+            Err(what_to_do) => {
+                handle_what_to_do!(what_to_do, [
+                    retry: { continue 'last_command },
+                    restart: { return Ok(Err(WhatToDo::RestartRequest)) },
+                    cont: { unreachable!() },
+                    abort: { return Ok(Err(WhatToDo::AbortRequest)) }
+                ]);
             }
         }
-
-        break 'last_command output.data;
     };
 
     let fpcalc_output: FPCalcJsonOutput = serde_json::from_slice(&output.stdout)?;

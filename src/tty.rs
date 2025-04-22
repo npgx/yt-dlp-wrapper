@@ -1,8 +1,7 @@
 use crate::{cli, lock, net, signals, video};
 use console::style;
-use tokio::net::TcpListener;
 
-pub(crate) async fn init() -> (TcpListener, u16) {
+pub(crate) async fn init() -> (tokio::net::TcpListener, u16) {
     let mut lock = lock::get_lock().await.expect("Failed to create lock to lockfile");
     let mut guard = lock
         .try_write()

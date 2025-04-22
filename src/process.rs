@@ -1,32 +1,58 @@
-use crate::fingerprinting::ExitStatusExt;
-use console::style;
+use crate::handle_ctrlc;
+use crate::user::{ask_what_to_do, WhatToDo};
+use console::{style, StyledObject};
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct WithExitStatus<T> {
-    pub(crate) exit_status: std::process::ExitStatus,
-    pub(crate) data: T,
-}
-
-pub(crate) async fn wait_for_child(mut child: tokio::process::Child) -> Result<WithExitStatus<()>, std::io::Error> {
-    child.wait().await.map(|status| status.with_unit())
+pub(crate) async fn wait_for_child(
+    mut child: tokio::process::Child,
+) -> Result<(std::process::ExitStatus, ()), std::io::Error> {
+    child.wait().await.map(|status| (status, ()))
 }
 
 pub(crate) async fn wait_for_child_output(
     child: tokio::process::Child,
-) -> Result<WithExitStatus<std::process::Output>, std::io::Error> {
-    child.wait_with_output().await.map(|output| output.status.with(output))
+) -> Result<(std::process::ExitStatus, std::process::Output), std::io::Error> {
+    child.wait_with_output().await.map(|output| (output.status, output))
 }
 
-pub(crate) async fn wrap_command_print_context<T, Ex, FT, FTErr>(
+#[derive(Debug, Clone)]
+pub(crate) enum ChildCommandExecution<T> {
+    Success(T),
+    NonZeroExitStatus(std::process::ExitStatus, T),
+    KilledBySignal(std::process::ExitStatus, T),
+    Wtd(WhatToDo),
+}
+
+impl<T> ChildCommandExecution<T> {
+    pub(crate) async fn into_success_or_ask_wtd<WTD>(
+        self,
+        make_message: impl FnOnce(std::process::ExitStatus, T) -> (StyledObject<String>, WTD),
+    ) -> Result<Result<T, WhatToDo>, anyhow::Error>
+    where
+        WTD: AsRef<[WhatToDo]>,
+    {
+        match self {
+            ChildCommandExecution::Success(data) => Ok(Ok(data)),
+            ChildCommandExecution::NonZeroExitStatus(status, data)
+            | ChildCommandExecution::KilledBySignal(status, data) => {
+                let (message, allowed) = make_message(status, data);
+                let what_to_do = ask_what_to_do(message, &allowed).await?;
+                Ok(Err(what_to_do))
+            }
+            ChildCommandExecution::Wtd(what_to_do) => Ok(Err(what_to_do)),
+        }
+    }
+}
+
+pub(crate) async fn handle_child_command_execution<T, Ex, FT, FTErr>(
     full_command: &[impl AsRef<str>],
     work_dir: &Path,
     user_settings: impl FnOnce(tokio::process::Command) -> tokio::process::Command,
     extract: Ex,
-) -> Result<WithExitStatus<T>, anyhow::Error>
+) -> Result<ChildCommandExecution<T>, anyhow::Error>
 where
     Ex: FnOnce(tokio::process::Child) -> FT,
-    FT: Future<Output = Result<WithExitStatus<T>, FTErr>>,
+    FT: Future<Output = Result<(std::process::ExitStatus, T), FTErr>>,
     FTErr: std::error::Error + Send + Sync + 'static,
 {
     let full_command = full_command.iter().map(AsRef::as_ref).collect::<Vec<_>>();
@@ -42,6 +68,8 @@ where
         sep
     });
 
+    handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
+
     println!();
     println!("{}", style(separator).cyan());
     println!("Entering command context.");
@@ -54,27 +82,38 @@ where
     command.current_dir(work_dir);
     let mut command = user_settings(command);
     let child = command.spawn()?;
-    let result = extract(child).await?;
+    let (exit_status, result) = extract(child).await?;
 
-    println!();
-    println!("{}", style(separator).yellow());
-    println!("Returned to daemon context.");
-    if result.exit_status.success() {
-        println!(
-            "{}",
-            style(format!(
-                "Command returned exit code {}.",
-                &result.exit_status.code().unwrap()
-            ))
-            .green()
-        );
-    } else if let Some(err_code) = result.exit_status.code() {
-        println!("{}", style(format!("Command returned exit code {}.", err_code)).red());
+    let return_to_daemon = move |message: &StyledObject<String>| {
+        println!();
+        println!("{}", style(separator).yellow());
+        println!("Returned to daemon context.");
+        println!("{}", message);
+        println!("{}", style(separator).yellow());
+        println!();
+    };
+
+    if exit_status.success() {
+        let code = exit_status.code().unwrap();
+        let message = style(format!("Command returned exit code {}.", code)).green();
+        return_to_daemon(&message);
+
+        handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
+
+        Ok(ChildCommandExecution::Success(result))
+    } else if let Some(err_code) = exit_status.code() {
+        let message = style(format!("Command returned exit code {}.", err_code)).red();
+        return_to_daemon(&message);
+
+        handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
+
+        Ok(ChildCommandExecution::NonZeroExitStatus(exit_status, result))
     } else {
-        println!("{}", style("Command was terminated by signal.").red());
-    }
-    println!("{}", style(separator).yellow());
-    println!();
+        let message = style("Command was terminated by signal.".to_string()).red();
+        return_to_daemon(&message);
 
-    Ok(result)
+        handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
+
+        Ok(ChildCommandExecution::KilledBySignal(exit_status, result))
+    }
 }

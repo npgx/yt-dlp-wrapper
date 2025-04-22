@@ -49,9 +49,13 @@ pub(crate) async fn check_ctrlc() -> Option<WhatToDo> {
 
 #[macro_export]
 macro_rules! handle_ctrlc {
-    () => {
-        match $crate::signals::check_ctrlc().await {
-            WhatToDo::Retry => {}
-        }
+    (restart: $rr:tt, abort: $ar:tt) => {
+        $crate::handle_what_to_do!($crate::signals::check_ctrlc().await, [
+            retry: { unreachable!() },
+            restart: { #[allow(unused_braces)] $rr },
+            cont: { /*do nothing*/ },
+            abort: { #[allow(unused_braces)] $ar },
+            none: { /*do nothing*/ }
+        ]);
     };
 }
