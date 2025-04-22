@@ -1,9 +1,12 @@
 [package]
 name = "yt-dlp-wrapper"
-authors = ["npgx <me@npgx.dev>"]
-description = "Handy wrapper to easily work with yt-dlp and beets"
 version = "0.1.0"
+authors = ["npgx <me@npgx.dev>"]
 edition = "2024"
+description = "Handy wrapper to easily work with yt-dlp and beets"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+
 
 [dependencies]
 fd-lock = { version = "4.0.4" }
