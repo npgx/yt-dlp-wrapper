@@ -1,6 +1,6 @@
 use crate::fingerprinting::acoustid;
 use crate::fingerprinting::acoustid::FingerprintSubmissionResult;
-use crate::user::WhatToDo;
+use crate::user::{ask_what_to_do, WhatToDo};
 use crate::{cli, fingerprinting, handle_ctrlc, handle_what_to_do, process};
 use console::style;
 use std::path::Path;
@@ -84,25 +84,45 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
 
     handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
-    let fingerprint_lookup = acoustid::lookup_fingerprint(
-        acoustid_client,
-        &fpcalc_output.fingerprint,
-        fpcalc_output.duration.floor() as u64,
-        acoustid::ACOUSTID_CLIENT_KEY,
-    )
-    .await?;
+    let fingerprint_lookup = 'lookup: loop {
+        let lookup = acoustid::lookup_fingerprint(
+            acoustid_client,
+            &fpcalc_output.fingerprint,
+            fpcalc_output.duration.floor() as u64,
+            acoustid::ACOUSTID_CLIENT_KEY,
+        )
+        .await?;
 
-    handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
+        handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
-    if fingerprint_lookup.status != "ok" {
-        return Err(anyhow::anyhow!(
-            "AcoustID fingerprint lookup failed with status (inside http response JSON body) {}",
-            fingerprint_lookup.status
-        ));
-    }
+        match lookup.status.as_ref() {
+            "ok" => break 'lookup Some(lookup),
+            not_ok => {
+                let what_to_do = ask_what_to_do(
+                    style(format!(
+                        "AcoustID fingerprint lookup failed! The fingerprint might not have been registered yet. Status: '{}'",
+                        not_ok
+                    )),
+                    WhatToDo::all(),
+                )
+                .await?;
 
-    let results = fingerprint_lookup.results.unwrap_or_else(Vec::new);
+                handle_what_to_do!(what_to_do, [
+                    retry: { continue 'lookup },
+                    restart: { return Ok(Some(WhatToDo::RestartRequest)) },
+                    cont: { break 'lookup None },
+                    abort: { return Ok(Some(WhatToDo::AbortRequest)) }
+                ]);
+            }
+        }
+    };
 
+    // Will be empty if lookup failed...
+    let results = fingerprint_lookup
+        .and_then(|lookup| lookup.results)
+        .unwrap_or_else(Vec::new);
+
+    // ...which will make both of these empty too...
     let (results_with_recordings, results_others): (Vec<_>, Vec<_>) = results
         .into_iter()
         .partition(|entry| entry.recordings.as_ref().is_some_and(|recs| !recs.is_empty()));
@@ -128,6 +148,7 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
     handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
     if selection.is_none() {
+        // ...which will trigger this
         match acoustid::handle_fingerprint_submission(acoustid_client, &fpcalc_output).await? {
             FingerprintSubmissionResult::Wtd(what_to_do) => return Ok(Some(what_to_do)),
             FingerprintSubmissionResult::Recording(recording) => {
