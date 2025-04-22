@@ -21,16 +21,25 @@ where
     A: AsRef<[S]>,
     S: AsRef<str> + Clone,
 {
+    // shouldn't, but might, have duplicates
     let mbids = mbids.as_ref();
+    
+    // Option<Arc<_>> lets us check if we're all done below,
+    // without having to check if all elements in mbids are in the cache
     let mut cache =
         HashMap::<&str, Option<Arc<musicbrainz_rs::entity::recording::Recording>>>::with_capacity(mbids.len());
+
+    // initialize it to None
+    for mbid in mbids {
+        cache.insert(mbid.as_ref(), None);
+    }
 
     'interact: loop {
         for mbid in mbids {
             let mbid = mbid.as_ref();
 
             match cache.get(mbid) {
-                None => panic!(),
+                None => unreachable!(),
                 Some(None) => match fetch_recording_data(mbid).await {
                     Ok(recording) => {
                         cache.insert(mbid, Some(recording));
