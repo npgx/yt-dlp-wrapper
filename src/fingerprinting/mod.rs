@@ -6,116 +6,158 @@ use crate::fingerprinting::acoustid::response::LookupResultsEntry;
 use crate::musicbrainz;
 use crate::process::WithExitStatus;
 use console::style;
+use std::future::ready;
 use std::process::ExitStatus;
+use std::sync::Arc;
 
-struct SelectionTreeLookupResultsEntry<'e> {
-    entry: &'e LookupResultsEntry,
-    _recording_data: once_cell::unsync::OnceCell<Vec<musicbrainz_rs::entity::recording::Recording>>,
+struct SelectionTreeLookupResultsEntry<'lre> {
+    entry: &'lre LookupResultsEntry,
+    _recording_data: tokio::sync::OnceCell<Vec<Arc<musicbrainz_rs::entity::recording::Recording>>>,
     entry_display: String,
-    _recording_display: once_cell::unsync::OnceCell<Vec<String>>,
+    _recording_display: tokio::sync::OnceCell<Arc<Vec<String>>>,
 }
 
-impl<'e> SelectionTreeLookupResultsEntry<'e> {
-    fn new(entry: &'e LookupResultsEntry) -> Self {
+impl<'lre> SelectionTreeLookupResultsEntry<'lre> {
+    fn new(entry: &'lre LookupResultsEntry) -> Self {
         Self {
-            entry,
-            _recording_data: once_cell::unsync::OnceCell::new(),
+            _recording_data: tokio::sync::OnceCell::new(),
             entry_display: format!(
                 "Score: {}, AcoustID: {}, Recordings: {}",
                 style(&entry.score).cyan().bold(),
                 &entry.id,
                 style(entry.recordings.as_ref().unwrap().len()).cyan()
             ),
-            _recording_display: once_cell::unsync::OnceCell::new(),
+            _recording_display: tokio::sync::OnceCell::new(),
+            entry,
         }
     }
 
-    fn recording_data(&self, runtime: &tokio::runtime::Handle) -> &Vec<musicbrainz_rs::entity::recording::Recording> {
+    pub(crate) async fn recording_data(&self) -> &Vec<Arc<musicbrainz_rs::entity::recording::Recording>> {
         self._recording_data
-            .get_or_init(|| musicbrainz::fetch_recording_data_from_mbz(self.entry, runtime))
+            .get_or_init(|| async {
+                match self.entry.recordings.as_ref() {
+                    Some(vec) => {
+                        musicbrainz::fetch_all_recordings_with_interact(
+                            vec.iter().map(|entry| &entry.id).collect::<Vec<_>>(),
+                        )
+                        .await
+                    }
+                    None => ready(Vec::new()).await,
+                }
+            })
+            .await
     }
 
-    fn recording_display(&self, runtime: &tokio::runtime::Handle) -> &Vec<String> {
-        self._recording_display.get_or_init(|| {
-            self.recording_data(runtime)
-                .iter()
-                .map(|recording| {
-                    format!(
-                        "https://musicbrainz.org/recording/{}; Title: {}, Disambiguation: {}, Artists: {}",
-                        &self.entry.id,
-                        style(&recording.title).blue(),
-                        style(
-                            recording
-                                .disambiguation
-                                .as_ref()
-                                .map(|s| s as &str)
-                                .unwrap_or_else(|| "")
-                        )
-                        .blue(),
-                        style(musicbrainz::artists_to_string(
-                            recording
-                                .artist_credit
-                                .as_ref()
-                                .map(|s| s as &[_])
-                                .unwrap_or_else(|| &[])
-                        ))
-                        .blue()
-                    )
-                })
-                .collect()
-        })
+    pub(crate) async fn recording_display(&self) -> Arc<Vec<String>> {
+        self._recording_display
+            .get_or_init(|| async {
+                Arc::new(
+                    self.recording_data()
+                        .await
+                        .iter()
+                        .map(|recording| {
+                            format!(
+                                "https://musicbrainz.org/recording/{}; Title: {}, Disambiguation: {}, Artists: {}",
+                                &self.entry.id,
+                                style(&recording.title).blue(),
+                                style(
+                                    recording
+                                        .disambiguation
+                                        .as_ref()
+                                        .map(|s| s as &str)
+                                        .unwrap_or_else(|| "")
+                                )
+                                .blue(),
+                                style(musicbrainz::artists_to_string(
+                                    recording
+                                        .artist_credit
+                                        .as_ref()
+                                        .map(|s| s as &[_])
+                                        .unwrap_or_else(|| &[])
+                                ))
+                                .blue()
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .await
+            .clone()
     }
 }
 
-fn get_recording_from_selection_tree(
-    results: &[LookupResultsEntry],
-    runtime: tokio::runtime::Handle,
-) -> Option<musicbrainz_rs::entity::recording::Recording> {
-    let results: Vec<_> = results.iter().map(SelectionTreeLookupResultsEntry::new).collect();
+mod tree {
+    use super::*;
 
-    let results_display: Vec<_> = results.iter().map(|tree_entry| &tree_entry.entry_display).collect();
-
-    let ask_top_level = |first_run: bool| {
+    pub(super) async fn ask_top_level<'lre>(
+        first_run: bool,
+        results: &'lre Vec<SelectionTreeLookupResultsEntry<'lre>>,
+        results_display: Arc<Vec<String>>,
+    ) -> Result<Option<&'lre SelectionTreeLookupResultsEntry<'lre>>, tokio::task::JoinError> {
         if first_run && results.len() == 1 && results[0].entry.score > 0.95 {
-            println!("{} {}", style("Autoselecting").magenta(), results_display[0]);
-            Some(&results[0])
+            println!("{} {}", style("Autoselecting").magenta(), &results_display[0]);
+            Ok(Some(&results[0]))
         } else {
-            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .item("<none>")
-                .items(&results_display)
-                .default(0)
-                .max_length(16)
-                .interact()
-                .ok()
-                .filter(|index| *index > 0)
-                .map(|index| &results[index - 1])
-        }
-    };
+            let selected = tokio::task::spawn_blocking(move || {
+                dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                    .item("<none>")
+                    .items(&results_display)
+                    .default(0)
+                    .max_length(16)
+                    .interact()
+                    .ok()
+                    .filter(|index| *index > 0)
+            })
+            .await?;
 
-    let ask_results = |first_run: bool, entry: &SelectionTreeLookupResultsEntry| {
-        let recordings = entry.recording_data(&runtime);
-        let recordings_display = entry.recording_display(&runtime);
+            Ok(selected.map(|index| &results[index]))
+        }
+    }
+
+    pub(super) async fn ask_results<'lre>(
+        first_run: bool,
+        entry: &'lre SelectionTreeLookupResultsEntry<'lre>,
+    ) -> Result<Option<Arc<musicbrainz_rs::entity::recording::Recording>>, tokio::task::JoinError> {
+        let recordings = entry.recording_data().await;
+        let recordings_display = entry.recording_display().await;
 
         if first_run && recordings.len() == 1 {
             println!("{} {}", style("Autoselecting").magenta(), recordings_display[0]);
-            Some(recordings[0].clone())
+            Ok(Some(recordings[0].clone()))
         } else {
-            dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                .with_prompt(format!(
-                    "{}: {}",
-                    style("Currently exploring AcoustID").italic(),
-                    &entry.entry.id
-                ))
-                .item("<back>")
-                .items(recordings_display)
-                .default(0)
-                .max_length(16)
-                .interact()
-                .ok()
-                .filter(|index| *index > 0)
-                .map(|index| recordings[index - 1].clone())
+            let id = entry.entry.id.clone();
+            let selected = tokio::task::spawn_blocking(move || {
+                dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                    .with_prompt(format!("{}: {}", style("Currently exploring AcoustID").italic(), id))
+                    .item("<back>")
+                    .items(&recordings_display)
+                    .default(0)
+                    .max_length(16)
+                    .interact()
+                    .ok()
+                    .filter(|index| *index > 0)
+            })
+            .await?;
+
+            Ok(selected.map(|index| recordings[index].clone()))
         }
-    };
+    }
+}
+
+async fn get_recording_from_selection_tree(
+    results: &[LookupResultsEntry],
+) -> Result<Option<Arc<musicbrainz_rs::entity::recording::Recording>>, anyhow::Error> {
+    let results: Vec<SelectionTreeLookupResultsEntry> = results
+        .iter()
+        .map(|entry| SelectionTreeLookupResultsEntry::new(entry))
+        .collect();
+
+    let results_display: Arc<Vec<String>> = Arc::new(
+        results
+            .iter()
+            .map(|tree_entry| tree_entry.entry_display.clone())
+            .collect(),
+    );
 
     println!(
         "Select correct recording, or {} if none is correct",
@@ -124,9 +166,9 @@ fn get_recording_from_selection_tree(
 
     let mut first_run = true;
     'outer: loop {
-        match ask_top_level(first_run) {
+        match tree::ask_top_level(first_run, &results, results_display.clone()).await? {
             Some(entry) => 'inner: loop {
-                match ask_results(first_run, entry) {
+                match tree::ask_results(first_run, &entry).await? {
                     None => {
                         first_run = false;
                         continue 'outer;
@@ -151,16 +193,19 @@ fn get_recording_from_selection_tree(
                             .cyan()
                             .bold(),
                         );
-                        let confirm = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                            .with_prompt("Confirm?")
-                            .default(true)
-                            .show_default(true)
-                            .wait_for_newline(true)
-                            .interact()
-                            .is_ok_and(|r| r);
+                        let confirm = tokio::task::spawn_blocking(move || {
+                            dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                                .with_prompt("Confirm?")
+                                .default(true)
+                                .show_default(true)
+                                .wait_for_newline(true)
+                                .interact()
+                                .is_ok_and(|r| r)
+                        })
+                        .await?;
 
                         if confirm {
-                            return Some(record.clone());
+                            return Ok(Some(record));
                         } else {
                             first_run = false;
                             continue 'inner;
@@ -168,7 +213,7 @@ fn get_recording_from_selection_tree(
                     }
                 }
             },
-            None => return None,
+            None => return Ok(None),
         }
     }
 }

@@ -1,7 +1,8 @@
-use crate::cli::TtyArgs;
+use crate::signals::check_ctrlc;
 use crate::user::{ask_what_to_do, WhatToDo};
-use crate::{cli, fingerprinting, process};
+use crate::{cli, double_loop_what_to_do, double_loop_what_to_do_opt, fingerprinting, process};
 use console::style;
+use std::time::Duration;
 use url::Url;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -52,10 +53,43 @@ impl VideoRequest {
     }
 }
 
+pub(crate) async fn spawn_video_request_handler(
+    mut vreq_receive: tokio::sync::mpsc::Receiver<VideoRequest>,
+    args: cli::TtyArgs,
+) {
+    tokio::spawn(async move {
+        let mut acoustid_client = reqwest::Client::builder()
+            .connector_layer(
+                tower::ServiceBuilder::new()
+                    .layer(tower::buffer::BufferLayer::new(16))
+                    .layer(tower::timeout::TimeoutLayer::new(Duration::from_secs(2)))
+                    .layer(tower::limit::RateLimitLayer::new(3, Duration::from_secs(1))),
+            )
+            .https_only(true)
+            .build()
+            .expect("Could not initialize acoust_id reqwest client.");
+
+        while let Some(vreq) = vreq_receive.recv().await {
+            let result = process_video_request(vreq, &args, &mut acoustid_client).await;
+
+            match result {
+                Ok(true) => {}
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!(
+                        "{}\n{error}",
+                        style("Failed to handle video request!").for_stderr().red()
+                    )
+                }
+            }
+        }
+    });
+}
+
 pub(crate) type DidRun = bool;
-pub(crate) async fn handle_video_request(
+pub(crate) async fn process_video_request(
     request: VideoRequest,
-    args: &TtyArgs,
+    args: &cli::TtyArgs,
     acoustid_client: &mut reqwest::Client,
 ) -> Result<DidRun, anyhow::Error> {
     'request: loop {
@@ -73,11 +107,13 @@ pub(crate) async fn handle_video_request(
 
         'last_command: loop {
             let yt_dlp_exit_status =
-                process::wrap_command_print_context(&ytdlp_cmd, work_dir_path, |cmd| cmd, process::wait_for_cmd)
+                process::wrap_command_print_context(&ytdlp_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
                     .await?;
 
+            double_loop_what_to_do_opt!(check_ctrlc().await, 'request, 'last_command, Ok(false), none: {});
+
             if !yt_dlp_exit_status.exit_status.success() {
-                match ask_what_to_do(
+                let what_to_do = ask_what_to_do(
                     style(format!(
                         "yt-dlp returned a non-zero exit code: {}",
                         yt_dlp_exit_status.exit_status
@@ -85,32 +121,20 @@ pub(crate) async fn handle_video_request(
                     .red(),
                     WhatToDo::all(),
                 )
-                .await?
-                {
-                    WhatToDo::Retry => continue 'last_command,
-                    WhatToDo::RestartRequest => continue 'request,
-                    WhatToDo::Continue => break 'last_command,
-                    WhatToDo::AbortRequest => break 'request Ok(false),
-                }
+                .await?;
+
+                double_loop_what_to_do!(what_to_do, 'request, 'last_command, Ok(false));
             }
 
             break 'last_command;
         }
 
         'last_command: loop {
-            if let Some(todo) =
+            let what_to_do =
                 fingerprinting::file::handle_fingerprinting_process_for_directory(work_dir_path, acoustid_client, args)
-                    .await?
-            {
-                match todo {
-                    WhatToDo::Retry => continue 'last_command,
-                    WhatToDo::RestartRequest => continue 'request,
-                    WhatToDo::Continue => break 'last_command,
-                    WhatToDo::AbortRequest => break 'request Ok(false),
-                }
-            }
+                    .await?;
 
-            break 'last_command;
+            double_loop_what_to_do_opt!(what_to_do, 'request, 'last_command, Ok(false), none: { break 'last_command });
         }
 
         let mut beet_cmd: Vec<&str> = Vec::with_capacity(args.beet.components.len());
@@ -120,10 +144,11 @@ pub(crate) async fn handle_video_request(
         beet_cmd.push(".");
         'last_command: loop {
             let beet_exit_status =
-                process::wrap_command_print_context(&beet_cmd, work_dir_path, |cmd| cmd, process::wait_for_cmd).await?;
+                process::wrap_command_print_context(&beet_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
+                    .await?;
 
             if !beet_exit_status.exit_status.success() {
-                match ask_what_to_do(
+                let what_to_do = ask_what_to_do(
                     style(format!(
                         "beet returned a non-zero exit code: {}",
                         beet_exit_status.exit_status
@@ -131,13 +156,9 @@ pub(crate) async fn handle_video_request(
                     .red(),
                     WhatToDo::all(),
                 )
-                .await?
-                {
-                    WhatToDo::Retry => continue 'last_command,
-                    WhatToDo::RestartRequest => continue 'request,
-                    WhatToDo::Continue => break 'last_command,
-                    WhatToDo::AbortRequest => break 'request Ok(false),
-                }
+                .await?;
+
+                double_loop_what_to_do!(what_to_do, 'request, 'last_command, Ok(false));
             }
 
             break 'last_command;

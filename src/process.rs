@@ -8,11 +8,11 @@ pub(crate) struct WithExitStatus<T> {
     pub(crate) data: T,
 }
 
-pub(crate) async fn wait_for_cmd(mut child: tokio::process::Child) -> Result<WithExitStatus<()>, std::io::Error> {
+pub(crate) async fn wait_for_child(mut child: tokio::process::Child) -> Result<WithExitStatus<()>, std::io::Error> {
     child.wait().await.map(|status| status.with_unit())
 }
 
-pub(crate) async fn wait_for_cmd_output(
+pub(crate) async fn wait_for_child_output(
     child: tokio::process::Child,
 ) -> Result<WithExitStatus<std::process::Output>, std::io::Error> {
     child.wait_with_output().await.map(|output| output.status.with(output))

@@ -1,41 +1,53 @@
-use crate::fingerprinting::acoustid::response::{LookupResultsEntry, RecordingEntry};
 use console::style;
 use musicbrainz_rs::Fetch;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-pub(crate) fn fetch_recording_data_from_mbz(
-    entry: &LookupResultsEntry,
-    runtime: &tokio::runtime::Handle,
-) -> Vec<musicbrainz_rs::entity::recording::Recording> {
-    fn entry_to_recording(
-        entry: &RecordingEntry,
-        runtime: &tokio::runtime::Handle,
-    ) -> Result<musicbrainz_rs::entity::recording::Recording, musicbrainz_rs::Error> {
-        runtime.block_on(
-            musicbrainz_rs::entity::recording::Recording::fetch()
-                .id(&entry.id)
-                .with_artists()
-                .execute(),
-        )
-    }
+pub(crate) async fn fetch_recording_data(
+    mbid: impl AsRef<str>,
+) -> Result<Arc<musicbrainz_rs::entity::recording::Recording>, musicbrainz_rs::Error> {
+    musicbrainz_rs::entity::recording::Recording::fetch()
+        .id(mbid.as_ref())
+        .with_artists()
+        .execute()
+        .await
+        .map(Arc::new)
+}
 
-    let mut entries = entry.recordings.clone().unwrap_or_default();
-    let mut recordings = Vec::new();
+pub(crate) async fn fetch_all_recordings_with_interact<A, S>(
+    mbids: A,
+) -> Vec<Arc<musicbrainz_rs::entity::recording::Recording>>
+where
+    A: AsRef<[S]>,
+    S: AsRef<str> + Clone,
+{
+    let mbids = mbids.as_ref();
+    let mut cache =
+        HashMap::<&str, Option<Arc<musicbrainz_rs::entity::recording::Recording>>>::with_capacity(mbids.len());
 
-    'fetch: loop {
-        entries.retain(|entry| match entry_to_recording(entry, runtime) {
-            Ok(recording) => {
-                recordings.push(recording);
-                false
+    'interact: loop {
+        for mbid in mbids {
+            let mbid = mbid.as_ref();
+
+            match cache.get(mbid) {
+                None => panic!(),
+                Some(None) => match fetch_recording_data(mbid).await {
+                    Ok(recording) => {
+                        cache.insert(mbid, Some(recording));
+                    }
+                    Err(err) => {
+                        println!("Failed to fetch https://musicbrainz.org/recording/{}: {}", mbid, err);
+                    }
+                },
+                Some(_) => {}
             }
-            Err(_) => true,
-        });
-        if entries.is_empty() {
-            break 'fetch;
-        } else {
+        }
+
+        if cache.values().any(Option::is_none) {
             let retry = dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
                 .with_prompt(format!(
                     "{} {}, retry?",
-                    style(entries.len()).red(),
+                    style(cache.values().filter(|opt| opt.is_none()).count()).red(),
                     style("MusicBrainz API calls have failed").red(),
                 ))
                 .default(true)
@@ -44,13 +56,13 @@ pub(crate) fn fetch_recording_data_from_mbz(
                 .interact();
 
             match retry {
-                Ok(true) => continue 'fetch,
-                _ => break 'fetch,
+                Ok(true) => continue 'interact,
+                _ => break 'interact,
             }
         }
     }
 
-    recordings
+    cache.into_values().flatten().collect()
 }
 
 pub(crate) fn artists_to_string(data: impl AsRef<[musicbrainz_rs::entity::artist_credit::ArtistCredit]>) -> String {

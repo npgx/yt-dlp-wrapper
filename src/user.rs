@@ -48,6 +48,52 @@ impl Display for WhatToDo {
     }
 }
 
+#[macro_export]
+macro_rules! handle_what_to_do {
+    ($wtd:expr, [ retry: $r:tt, restart: $rr:tt, cont: $c:tt, abort: $ar:tt ]) => {
+        match ($wtd) {
+            WhatToDo::Retry => ($r),
+            WhatToDo::RestartRequest => ($rr),
+            WhatToDo::Continue => ($c),
+            WhatToDo::AbortRequest => ($ar),
+        }
+    };
+    ($wtd:expr, [ retry: $r:tt, restart: $rr:tt, cont: $c:tt, abort: $ar:tt, none: $none:tt ]) => {
+        match ($wtd) {
+            Some(WhatToDo::Retry) => ($r),
+            Some(WhatToDo::RestartRequest) => ($rr),
+            Some(WhatToDo::Continue) => ($c),
+            Some(WhatToDo::AbortRequest) => ($ar),
+            None => ($none),
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! double_loop_what_to_do {
+    ($wtd:expr, $outer:lifetime, $inner:lifetime, $value:expr) => {
+        match ($wtd) {
+            WhatToDo::Retry => { continue $inner },
+            WhatToDo::RestartRequest => { continue $outer },
+            WhatToDo::Continue => { break $inner },
+            WhatToDo::AbortRequest => { break $outer $value },
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! double_loop_what_to_do_opt {
+    ($wtd:expr, $outer:lifetime, $inner:lifetime, $value:expr, none: $none:tt) => {
+        match ($wtd) {
+            Some(WhatToDo::Retry) => { continue $inner },
+            Some(WhatToDo::RestartRequest) => { continue $outer },
+            Some(WhatToDo::Continue) => { break $inner },
+            Some(WhatToDo::AbortRequest) => { break $outer $value },
+            None => ($none),
+        }
+    };
+}
+
 pub(crate) async fn ask_what_to_do(
     message: console::StyledObject<String>,
     allowed: impl AsRef<[WhatToDo]>,

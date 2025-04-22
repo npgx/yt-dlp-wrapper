@@ -114,11 +114,7 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
         println!("{}", style("No AcoustID matches with associated recordings!").magenta());
         None
     } else {
-        let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            fingerprinting::get_recording_from_selection_tree(&results_with_recordings, runtime)
-        })
-        .await?
+        fingerprinting::get_recording_from_selection_tree(&results_with_recordings).await?
     };
 
     if selection.is_none() {
@@ -164,7 +160,7 @@ pub(crate) async fn fingerprint_filepath(path: &Path) -> Result<Result<FPCalcJso
                 cmd.stderr(Stdio::piped());
                 cmd
             },
-            process::wait_for_cmd_output,
+            process::wait_for_child_output,
         )
         .await?;
 

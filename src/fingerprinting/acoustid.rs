@@ -1,11 +1,12 @@
 use crate::fingerprinting::file::FPCalcJsonOutput;
 use crate::musicbrainz::artists_to_string;
 use crate::user::{ask_what_to_do, WhatToDo};
+use crate::utils::iters::IntoRepeatLast;
+use crate::{handle_what_to_do, musicbrainz};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
-use musicbrainz_rs::Fetch;
 use serde::{Deserialize, Serialize};
-use std::iter::FusedIterator;
+use std::sync::Arc;
 use std::time::Duration;
 
 // this is not a secret, it's the API key of the client, which is this program
@@ -78,12 +79,8 @@ pub(crate) async fn submit_fingerprint(
     duration: u64,
     mbid: &str,
     user_api_key: &str,
-) -> Result<(Option<WhatToDo>, musicbrainz_rs::entity::recording::Recording), anyhow::Error> {
-    let recording = musicbrainz_rs::entity::recording::Recording::fetch()
-        .id(mbid)
-        .with_artists()
-        .execute()
-        .await?;
+) -> Result<(Option<WhatToDo>, Arc<musicbrainz_rs::entity::recording::Recording>), anyhow::Error> {
+    let recording = musicbrainz::fetch_recording_data(mbid).await?;
 
     let duration = duration.to_string();
     let mut query = vec![
@@ -114,65 +111,6 @@ pub(crate) async fn submit_fingerprint(
     Ok((maybe_what_to_do, recording))
 }
 
-struct RepeatLast<I, E> {
-    inner: I,
-    last: Option<E>,
-}
-
-impl<I, E: Clone> RepeatLast<I, E> {
-    pub(crate) fn new(inner: I) -> Self {
-        Self { inner, last: None }
-    }
-}
-
-impl<I> Iterator for RepeatLast<I, <I as Iterator>::Item>
-where
-    I: Iterator,
-    <I as Iterator>::Item: Clone,
-{
-    type Item = <I as Iterator>::Item;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.inner.next() {
-            None => self.last.clone(),
-            Some(item) => {
-                self.last.replace(item.clone());
-                Some(item)
-            }
-        }
-    }
-
-    // just like Cycle Iter
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self.inner.size_hint() {
-            sz @ (0, Some(0)) => sz,
-            (0, _) => (0, None),
-            _ => (usize::MAX, None),
-        }
-    }
-}
-
-impl<I> FusedIterator for RepeatLast<I, <I as Iterator>::Item>
-where
-    I: Iterator,
-    <I as Iterator>::Item: Clone,
-{
-}
-
-trait IntoRepeatLast<I, E> {
-    fn repeat_last(self) -> RepeatLast<I, E>;
-}
-
-impl<I> IntoRepeatLast<I, <I as Iterator>::Item> for I
-where
-    I: Iterator,
-    <I as Iterator>::Item: Clone,
-{
-    fn repeat_last(self) -> RepeatLast<I, <I as Iterator>::Item> {
-        RepeatLast::new(self)
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct AcoustIDSubmissionStatus {
     status: String,
@@ -191,9 +129,10 @@ pub(crate) struct AcoustIDSubmissionStatusEntryResult {
     id: String,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) enum FingerprintSubmissionResult {
     WTD(WhatToDo),
-    Recording(musicbrainz_rs::entity::recording::Recording),
+    Recording(Arc<musicbrainz_rs::entity::recording::Recording>),
     Nothing,
 }
 
@@ -286,6 +225,7 @@ pub(crate) async fn handle_fingerprint_submission(
             )
             .await?;
 
+            // too much stuff to use macro here
             match what_to_do {
                 Some(WhatToDo::Retry) => continue 'submit,
                 Some(WhatToDo::RestartRequest) => return Ok(FingerprintSubmissionResult::WTD(WhatToDo::AbortRequest)),
@@ -366,12 +306,12 @@ pub(crate) async fn confirm_fingerprint_status(
                 )
                 .await?;
 
-                match what_to_do {
-                    WhatToDo::Retry => continue 'request_loop,
-                    WhatToDo::RestartRequest => return Ok(Some(WhatToDo::RestartRequest)),
-                    WhatToDo::Continue => return Ok(Some(WhatToDo::Continue)),
-                    WhatToDo::AbortRequest => return Ok(Some(WhatToDo::AbortRequest)),
-                }
+                handle_what_to_do!(what_to_do, [
+                    retry: { continue 'request_loop },
+                    restart: { return Ok(Some(WhatToDo::RestartRequest)) },
+                    cont: { return Ok(Some(WhatToDo::Continue)) },
+                    abort: { return Ok(Some(WhatToDo::AbortRequest)) }
+                ]);
             }
             println!(
                 "AcoustID server response status '{}', retrying...",
@@ -390,12 +330,12 @@ pub(crate) async fn confirm_fingerprint_status(
                 )
                 .await?;
 
-                match what_to_do {
-                    WhatToDo::Retry => continue 'request_loop,
-                    WhatToDo::RestartRequest => return Ok(Some(WhatToDo::RestartRequest)),
-                    WhatToDo::Continue => return Ok(Some(WhatToDo::Continue)),
-                    WhatToDo::AbortRequest => return Ok(Some(WhatToDo::AbortRequest)),
-                }
+                handle_what_to_do!(what_to_do, [
+                    retry: { continue 'request_loop },
+                    restart: { return Ok(Some(WhatToDo::RestartRequest)) },
+                    cont: { return Ok(Some(WhatToDo::Continue)) },
+                    abort: { return Ok(Some(WhatToDo::AbortRequest)) }
+                ]);
             }
             println!(
                 "AcoustID submission entry status is '{}', retrying...",
@@ -418,7 +358,7 @@ pub(crate) async fn confirm_fingerprint_status(
         .green()
     );
 
-    // just to let user read
+    // just to let the user read
     let _ignore: String = tokio::task::spawn_blocking(move || {
         dialoguer::Input::with_theme(&dialoguer::theme::ColorfulTheme::default())
             .with_prompt(format!("Press {} to continue...", style("Enter").bold().cyan()))

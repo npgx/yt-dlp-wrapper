@@ -1,11 +1,12 @@
 use crate::user::WhatToDo;
-use crate::{cli, musicbrainz, process, user};
+use crate::{cli, handle_what_to_do, musicbrainz, process, user};
 use console::style;
 use std::path::Path;
+use std::sync::Arc;
 
 pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
     filepath: &Path,
-    recording: musicbrainz_rs::entity::recording::Recording,
+    recording: Arc<musicbrainz_rs::entity::recording::Recording>,
     args: &cli::TtyArgs,
 ) -> Result<Option<WhatToDo>, anyhow::Error> {
     let filename = filepath.file_name().unwrap();
@@ -34,7 +35,7 @@ pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
         "-metadata",
         &format!(
             "Artist={}",
-            musicbrainz::artists_to_string(recording.artist_credit.unwrap())
+            musicbrainz::artists_to_string(recording.artist_credit.as_ref().unwrap())
         ),
         "-codec",
         "copy",
@@ -43,10 +44,11 @@ pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
 
     'last_command: loop {
         let ffmpeg_exit_status =
-            process::wrap_command_print_context(&ffmpeg_cmd, movedir.path(), |cmd| cmd, process::wait_for_cmd).await?;
+            process::wrap_command_print_context(&ffmpeg_cmd, movedir.path(), |cmd| cmd, process::wait_for_child)
+                .await?;
 
         if !ffmpeg_exit_status.exit_status.success() {
-            match user::ask_what_to_do(
+            let what_to_do = user::ask_what_to_do(
                 style(format!(
                     "ffmpeg returned a non-zero exit code: {}",
                     ffmpeg_exit_status.exit_status
@@ -54,13 +56,14 @@ pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
                 .red(),
                 WhatToDo::all(),
             )
-            .await?
-            {
-                WhatToDo::Retry => continue 'last_command,
-                WhatToDo::RestartRequest => return Ok(Some(WhatToDo::RestartRequest)),
-                WhatToDo::Continue => break 'last_command,
-                WhatToDo::AbortRequest => return Ok(Some(WhatToDo::AbortRequest)),
-            }
+            .await?;
+
+            handle_what_to_do!(what_to_do, [
+                retry: { continue 'last_command },
+                restart: { return Ok(Some(WhatToDo::RestartRequest)) },
+                cont: { break 'last_command },
+                abort: { return Ok(Some(WhatToDo::AbortRequest)) }
+            ]);
         }
 
         break 'last_command;

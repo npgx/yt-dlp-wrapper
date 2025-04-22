@@ -10,6 +10,8 @@ pub(crate) mod tty;
 pub(crate) mod user;
 pub(crate) mod video;
 
+pub(crate) mod utils;
+
 use cli::{CliArgs, Command, Parser};
 
 #[tokio::main]
