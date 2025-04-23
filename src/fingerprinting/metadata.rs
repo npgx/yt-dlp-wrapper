@@ -23,7 +23,7 @@ pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
     std::fs::rename(filepath, &moved_filepath)?;
 
     let ffmpeg_cmd = [
-        "ffmpeg",
+        args.ffmpeg_display.get().unwrap(),
         "-loglevel",
         &args.ffmpeg_loglevel,
         "-i",

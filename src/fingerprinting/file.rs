@@ -77,7 +77,7 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
 ) -> Result<Option<WhatToDo>, anyhow::Error> {
     handle_ctrlc!(restart: { return Ok(Some(WhatToDo::RestartRequest)) }, abort: { return Ok(Some(WhatToDo::AbortRequest)) });
 
-    let fpcalc_output = match fingerprint_filepath(filepath).await? {
+    let fpcalc_output = match fingerprint_filepath(filepath, args).await? {
         Ok(data) => data,
         Err(todo) => return Ok(Some(todo)),
     };
@@ -178,9 +178,13 @@ pub(crate) struct FPCalcJsonOutput {
     pub(crate) fingerprint: String,
 }
 
-pub(crate) async fn fingerprint_filepath(path: &Path) -> Result<Result<FPCalcJsonOutput, WhatToDo>, anyhow::Error> {
-    let mut fpcalc_cmd = vec![String::from("fpcalc"), String::from("-json")];
-    fpcalc_cmd.push(path.display().to_string());
+pub(crate) async fn fingerprint_filepath(
+    path: &Path,
+    args: &cli::TtyArgs,
+) -> Result<Result<FPCalcJsonOutput, WhatToDo>, anyhow::Error> {
+    let mut fpcalc_cmd: Vec<&str> = vec![args.fpcalc_display.get().unwrap(), "-json"];
+    let path_display = path.display().to_string();
+    fpcalc_cmd.push(&path_display);
 
     let output = 'last_command: loop {
         use std::process::Stdio;

@@ -49,13 +49,11 @@ pub(crate) mod post {
     }
 }
 
-pub(crate) async fn start_axum_app(
-    vreq_sender: tokio::sync::mpsc::Sender<VideoRequest>,
-    tcpl: tokio::net::TcpListener,
-) {
+pub(crate) async fn start_axum_app(vreq_sender: tokio::sync::mpsc::Sender<VideoRequest>, tcpl: std::net::TcpListener) {
     let app = axum::Router::new()
         .route("/video-request", post(post::video_request))
         .with_state(TtyAxumState { vreq_sender });
 
+    let tcpl = tokio::net::TcpListener::from_std(tcpl).unwrap();
     axum::serve(tcpl, app).await.unwrap();
 }

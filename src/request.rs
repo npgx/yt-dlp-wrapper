@@ -1,22 +1,19 @@
-use crate::lock;
 use crate::video;
+use crate::{cli, lock};
 use anyhow::anyhow;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-#[derive(clap::Args, Debug)]
-pub(crate) struct RequestArgs {
-    #[arg(
-        long,
-        help = "Youtube url to use for creating the video request. Supports the majority of modern youtube urls (will extract the ID)."
-    )]
-    pub(crate) yt_url: String,
-}
-
-pub(crate) async fn run(args: RequestArgs) -> Result<(), anyhow::Error> {
-    let port = lock::read_port_no_lock()
-        .await
-        .expect("Failed to read daemon port from portfile! Is the daemon running?");
+pub(crate) async fn run(args: cli::RequestArgs) -> Result<(), anyhow::Error> {
+    let port = match args.port {
+        None => lock::read_port_no_lock()
+            .await
+            .expect("Failed to read daemon port from portfile! Is the daemon running?"),
+        Some(port) => {
+            println!("Using manually specified port {}", port);
+            port
+        }
+    };
 
     let daemon_addr = format!("127.0.0.1:{}", port).parse::<SocketAddr>()?;
     let client = reqwest::Client::builder()

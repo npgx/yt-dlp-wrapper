@@ -1,34 +1,62 @@
 use crate::{cli, lock, net, signals, video};
 use console::style;
+use std::sync::Arc;
 
-pub(crate) async fn init() -> (tokio::net::TcpListener, u16) {
-    let mut lock = lock::get_lock().await.expect("Failed to create lock to lockfile");
-    let mut guard = lock
-        .try_write()
-        .expect("Failed to acquire lock guard, is another daemon instance already running?");
+pub(crate) fn init(args: Arc<cli::TtyArgs>) -> (std::net::TcpListener, u16) {
+    let mut instance_lock = if args.dangerously_skip_lock_checks {
+        println!("{}", style("WARNING: Skipping lock check!").bold().red());
+        None
+    } else {
+        Some(lock::InstanceLock::lock_or_panic())
+    };
 
-    lock::write_pid(&mut guard)
-        .await
-        .expect("Failed to write PID to lockfile!");
+    if let Some(instance_lock) = instance_lock.as_mut() {
+        instance_lock.with_guard_mut(|guard| {
+            lock::write_pid(guard).expect("Failed to write PID to lockfile!");
+        })
+    };
 
-    let tcpl = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind TCP listener");
-    let port = tcpl.local_addr().unwrap().port();
+    let tcpl = match args.port_override {
+        None => std::net::TcpListener::bind("127.0.0.1:0").expect("Failed to bind TCP listener"),
+        Some(port_override) => match std::net::TcpListener::bind(format!("127.0.0.1:{port_override}")) {
+            Ok(tcpl) => tcpl,
+            Err(err) => {
+                panic!("Failed to bind TCP listener to explicitly-provided port {port_override}: {err}");
+            }
+        },
+    };
 
-    lock::write_port(&mut guard, port)
-        .await
-        .expect("Failed to write TCP listener port to portfile!");
+    tcpl.set_nonblocking(true)
+        .expect("Failed to set TCP listener to non-blocking mode");
+
+    let port = tcpl
+        .local_addr()
+        .expect("Failed to retrieve local_addr from TcpListener")
+        .port();
+
+    if let Some(instance_lock) = instance_lock.as_mut() {
+        instance_lock.with_guard_mut(|guard| {
+            lock::write_port(guard, port).expect("Failed to write TCP listener port to portfile!");
+        })
+    }
+
+    if let Some(instance_lock) = instance_lock {
+        // make sure the instance_lock lives for the whole program's lifetime
+        Box::leak(Box::new(instance_lock));
+    }
 
     (tcpl, port)
 }
 
-pub(crate) async fn run(args: cli::TtyArgs) {
-    let (tcpl, port) = init().await;
+pub(crate) async fn run(args: Arc<cli::TtyArgs>) {
+    let init_args = args.clone();
+    let (tcpl, port) = tokio::task::spawn_blocking(move || init(init_args))
+        .await
+        .expect("Failed TTY initialization");
 
     // using a mpsc queue lets us asynchronously add to the queue,
     // but handle each request one at a time in the terminal
-    let (vreq_send, vreq_receive) = tokio::sync::mpsc::channel(args.max_requests.clamp(1, 128));
+    let (vreq_send, vreq_receive) = tokio::sync::mpsc::channel(args.max_requests.clamp(1, 256) as usize);
 
     let axum_join = net::start_axum_app(vreq_send, tcpl);
 

@@ -1,6 +1,7 @@
 use crate::user::WhatToDo;
 use crate::{cli, double_loop_what_to_do, double_loop_what_to_do_opt, fingerprinting, handle_ctrlc, process};
 use console::style;
+use std::sync::Arc;
 use std::time::Duration;
 use url::Url;
 
@@ -57,7 +58,7 @@ impl VideoRequest {
 
 pub(crate) async fn spawn_video_request_handler(
     mut vreq_receive: tokio::sync::mpsc::Receiver<VideoRequest>,
-    args: cli::TtyArgs,
+    args: Arc<cli::TtyArgs>,
 ) {
     tokio::spawn(async move {
         let mut acoustid_client = reqwest::Client::builder()
@@ -100,9 +101,10 @@ pub(crate) async fn process_video_request(
         let work_dir = tempfile::tempdir()?;
         let work_dir_path = work_dir.path();
 
-        let mut ytdlp_cmd: Vec<&str> = Vec::with_capacity(args.yt_dlp.components.len());
-        for component in &args.yt_dlp.components {
-            ytdlp_cmd.push(component);
+        let mut ytdlp_cmd: Vec<&str> = Vec::with_capacity(args.yt_dlp_args.components.len() + 1);
+        ytdlp_cmd.push(args.yt_dlp_display.get().unwrap());
+        for component in &args.yt_dlp_args.components {
+            ytdlp_cmd.push(component); // coerces &String into &str
         }
         ytdlp_cmd.push("--");
         ytdlp_cmd.push(&request.youtube_id);
@@ -137,11 +139,13 @@ pub(crate) async fn process_video_request(
             double_loop_what_to_do_opt!(what_to_do, 'request, 'fingerprinting, Ok(false), none: { break 'fingerprinting });
         }
 
-        let mut beet_cmd: Vec<&str> = Vec::with_capacity(args.beet.components.len());
-        for component in &args.beet.components {
-            beet_cmd.push(component);
+        let mut beet_cmd: Vec<&str> = Vec::with_capacity(args.beet_args.components.len() + 1);
+        beet_cmd.push(args.beet_display.get().unwrap());
+        for component in &args.beet_args.components {
+            beet_cmd.push(component); // coerces &String into &str
         }
         beet_cmd.push(".");
+
         'last_command: loop {
             let beet_command_execution =
                 process::handle_child_command_execution(&beet_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
