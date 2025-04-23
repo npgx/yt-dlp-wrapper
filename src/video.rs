@@ -8,6 +8,7 @@ use url::Url;
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub(crate) struct VideoRequest {
     pub(crate) youtube_id: String,
+    pub(crate) from_pid: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -17,7 +18,7 @@ pub(crate) enum VideoRequestUrlParseError {
 }
 
 impl VideoRequest {
-    pub(crate) fn from_yt_url(youtube_url: &str) -> Result<Self, anyhow::Error> {
+    pub(crate) fn from_yt_url(youtube_url: &str, from_pid: u32) -> Result<Self, anyhow::Error> {
         let youtube_url: Url = youtube_url.parse()?;
         let host_str = youtube_url.host_str().unwrap_or_default();
 
@@ -52,7 +53,10 @@ impl VideoRequest {
             return Err(VideoRequestUrlParseError::UnknownUrlKind(youtube_url).into());
         };
 
-        Ok(Self { youtube_id: id })
+        Ok(Self {
+            youtube_id: id,
+            from_pid,
+        })
     }
 }
 
@@ -96,7 +100,10 @@ pub(crate) async fn process_video_request(
     acoustid_client: &mut reqwest::Client,
 ) -> Result<RanToCompletion, anyhow::Error> {
     'request: loop {
-        println!("Processing request for {}", &request.youtube_id);
+        println!(
+            "Processing request for {} from pid {}",
+            &request.youtube_id, request.from_pid
+        );
 
         let work_dir = tempfile::tempdir()?;
         let work_dir_path = work_dir.path();

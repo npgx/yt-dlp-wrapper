@@ -73,7 +73,7 @@ where
     println!();
     println!("{}", style(separator).cyan());
     println!("Entering command context.");
-    println!("Executing: {}", full_command.join(" "));
+    println!("Executing: [\'{}\']", full_command.join("\', \'"));
     println!("{}", style(separator).cyan());
     println!();
 

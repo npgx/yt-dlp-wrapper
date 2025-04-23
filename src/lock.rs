@@ -1,5 +1,5 @@
+use anyhow::anyhow;
 use ouroboros::self_referencing;
-use std::error::Error;
 use std::fs::File;
 use std::io::{ErrorKind, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -49,21 +49,29 @@ pub(crate) fn write_port(_guard: &mut fd_lock::RwLockWriteGuard<File>, port: u16
     Ok(())
 }
 
-pub(crate) async fn read_port_no_lock() -> Result<u16, Box<dyn Error + Send + Sync>> {
+pub(crate) fn ensure_tty_running_and_read_port() -> Result<u16, anyhow::Error> {
+    {
+        let mut lock = get_lock()?;
+
+        match lock.try_write() {
+            Ok(_guard) => {
+                panic!("TTY instance isn't running!")
+            }
+            Err(err) => match err.kind() {
+                ErrorKind::ResourceBusy | ErrorKind::WouldBlock => {
+                    // tty instance is running
+                }
+                _ => return Err(anyhow!("Invalid error kind: {}; {}", err.kind(), err)),
+            },
+        }
+    }
+
     let mut portfile_path = PathBuf::from(LOCKFILE_PATH_STR);
     portfile_path.set_extension("port");
-    
-    let raw = match tokio::fs::read(&portfile_path).await {
-        Ok(raw) => raw,
-        Err(err) => return Err(Box::new(err)),
-    };
 
-    let string = match String::from_utf8(raw) {
-        Ok(string) => string,
-        Err(err) => return Err(Box::new(err)),
-    };
+    let string = std::fs::read_to_string(&portfile_path)?;
 
-    string.parse::<u16>().map_err(|err| Box::new(err) as _)
+    Ok(string.parse::<u16>()?)
 }
 
 #[self_referencing]

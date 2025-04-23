@@ -46,19 +46,23 @@ mod tty_about {
 pub(crate) struct TtyArgs {
     #[arg(long, visible_alias("yt-dlp-executable"), default_value = "yt-dlp", help = tty_about::YT_DLP_EXEC)]
     pub(crate) yt_dlp: PathBuf,
+    #[arg(skip)]
     pub(crate) yt_dlp_display: once_cell::sync::OnceCell<String>,
-    #[arg(long, value_parser = posix_split_parser("--yt-dlp-args"), default_value = "", help = tty_about::YT_DLP_ARGS)]
+    #[arg(long, value_parser = parse_yt_dlp_args, default_value = "", allow_hyphen_values = true, help = tty_about::YT_DLP_ARGS)]
     pub(crate) yt_dlp_args: PosixSplit,
     #[arg(long, visible_alias("beet-executable"), default_value = "beet", help = tty_about::BEET_EXEC)]
     pub(crate) beet: PathBuf,
+    #[arg(skip)]
     pub(crate) beet_display: once_cell::sync::OnceCell<String>,
-    #[arg(long, value_parser = posix_split_parser("--beet-args"), default_value = "import -m -s", help = tty_about::BEET_ARGS)]
+    #[arg(long, value_parser = parse_beet_args, default_value = "import -m -s", allow_hyphen_values = true, help = tty_about::BEET_ARGS)]
     pub(crate) beet_args: PosixSplit,
     #[arg(long, visible_alias("fpcalc-executable"), default_value = "fpcalc", help = tty_about::FPCALC_EXEC)]
     pub(crate) fpcalc: PathBuf,
+    #[arg(skip)]
     pub(crate) fpcalc_display: once_cell::sync::OnceCell<String>,
     #[arg(long, visible_alias("ffmpeg-executable"), default_value = "ffmpeg", help = tty_about::FFMPEG_EXEC)]
     pub(crate) ffmpeg: PathBuf,
+    #[arg(skip)]
     pub(crate) ffmpeg_display: once_cell::sync::OnceCell<String>,
     #[arg(long, default_value = "warning", help = tty_about::FFMPEG_LOGLEVEL)]
     pub(crate) ffmpeg_loglevel: String,
@@ -77,6 +81,8 @@ mod request_about {
 
     pub(super) const PORT_OVERRIDE: &str =
         "Manually specify the tty/daemon's instance http port instead of reading from the lockfile.";
+
+    pub(super) const LOCK_OVERRIDE: &str = "ONLY ENABLE THIS IF YOU KNOW WHAT YOU ARE DOING. Usually request instances will try to tell if the tty instance is running though the lockfile's ownership. This disables that. If this option is active, you NEED to specify a port manually.";
 }
 
 #[derive(clap::Args, Debug)]
@@ -85,6 +91,8 @@ pub(crate) struct RequestArgs {
     pub(crate) yt_url: String,
     #[arg(long, visible_alias("http_port"), help = request_about::PORT_OVERRIDE)]
     pub(crate) port: Option<u16>,
+    #[arg(long, help = request_about::LOCK_OVERRIDE)]
+    pub(crate) dangerously_skip_lock_checks: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,32 +102,24 @@ pub(crate) enum PromptFlag {
     Never,
 }
 
-fn parse_prompt_flag(prompt: &str) -> Result<PromptFlag, TtyCliError> {
+fn parse_prompt_flag(prompt: &str) -> Result<PromptFlag, anyhow::Error> {
     match prompt.to_lowercase().as_str() {
         "always" => Ok(PromptFlag::Always),
         "ask" => Ok(PromptFlag::Ask),
         "never" => Ok(PromptFlag::Never),
-        _ => Err(TtyCliError::InvalidKeepTmp {
-            provided: prompt.to_string(),
-        }),
+        _ => Err(anyhow!(
+            "Invalid value: '{}', allowed values are 'always', 'ask' and 'never'",
+            prompt
+        )),
     }
 }
 
-fn posix_split_parser(
-    name: &str,
-) -> impl Fn(&str) -> Result<PosixSplit, anyhow::Error> + Clone + Send + Sync + 'static {
-    let name = name.to_string();
-    move |args| PosixSplit::from_raw(args).ok_or_else(|| anyhow!("Couldn't parse argument: {}", name))
+fn parse_yt_dlp_args(args: &str) -> Result<PosixSplit, anyhow::Error> {
+    PosixSplit::from_raw(args).ok_or_else(|| anyhow!("Couldn't parse argument: --yt-dlp-args"))
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
-pub(crate) enum TtyCliError {
-    #[error("The provided yt-dlp command is malformed")]
-    YtDlpCommand { erroneous_command: String },
-    #[error("The provided beet command is malformed")]
-    BeetCommand { erroneous_command: String },
-    #[error("The provided keep-tmp value is invalid")]
-    InvalidKeepTmp { provided: String },
+fn parse_beet_args(args: &str) -> Result<PosixSplit, anyhow::Error> {
+    PosixSplit::from_raw(args).ok_or_else(|| anyhow!("Couldn't parse argument: --beet-args"))
 }
 
 #[derive(Debug, Clone)]
