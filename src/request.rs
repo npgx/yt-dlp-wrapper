@@ -5,16 +5,22 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 pub(crate) async fn run(args: cli::RequestArgs) -> Result<(), anyhow::Error> {
-    let port = match (args.port, args.dangerously_skip_lock_checks) {
+    let port = match (args.port_override, args.dangerously_skip_lock_checks) {
         (None, false) => {
             tokio::task::spawn_blocking(|| {
-                lock::ensure_tty_running_and_read_port()
-                    .expect("Failed to read daemon port from portfile! Is the daemon running?")
+                lock::ensure_tty_running_and_read_port().map_err(|err| {
+                    anyhow!(
+                        "Failed to read daemon port from portfile! Is the daemon running?\n{}",
+                        err
+                    )
+                })
             })
-            .await?
+            .await??
         }
         (None, true) => {
-            panic!("ERROR: The lockfile check is set to be skipped, but no port has been specified!")
+            return Err(anyhow!(
+                "ERROR: The lockfile check is set to be skipped, but no port has been specified!"
+            ));
         }
         (Some(port), skip) => {
             if skip {
@@ -28,7 +34,7 @@ pub(crate) async fn run(args: cli::RequestArgs) -> Result<(), anyhow::Error> {
     let daemon_addr = format!("127.0.0.1:{}", port).parse::<SocketAddr>()?;
     let client = reqwest::Client::builder()
         .build()
-        .expect("Failed to create http client!");
+        .map_err(|err| anyhow!("Failed to create http client!\n{}", err))?;
 
     println!("Creating video request...");
     let video_request = video::VideoRequest::from_yt_url(&args.yt_url, std::process::id())?;

@@ -90,7 +90,7 @@ pub(crate) struct RequestArgs {
     #[arg(long, help = request_about::YT_URL)]
     pub(crate) yt_url: String,
     #[arg(long, visible_alias("http_port"), help = request_about::PORT_OVERRIDE)]
-    pub(crate) port: Option<u16>,
+    pub(crate) port_override: Option<u16>,
     #[arg(long, help = request_about::LOCK_OVERRIDE)]
     pub(crate) dangerously_skip_lock_checks: bool,
 }

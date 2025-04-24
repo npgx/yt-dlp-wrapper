@@ -12,7 +12,8 @@ pub(crate) fn init(args: Arc<cli::TtyArgs>) -> (std::net::TcpListener, u16) {
 
     if let Some(instance_lock) = instance_lock.as_mut() {
         instance_lock.with_guard_mut(|guard| {
-            lock::write_pid(guard).expect("Failed to write PID to lockfile!");
+            // temporarily write port 0 in lockfile
+            lock::write_pid_port(guard, 0).expect("Failed to write PID/PORT to lockfile!");
         })
     };
 
@@ -36,7 +37,7 @@ pub(crate) fn init(args: Arc<cli::TtyArgs>) -> (std::net::TcpListener, u16) {
 
     if let Some(instance_lock) = instance_lock.as_mut() {
         instance_lock.with_guard_mut(|guard| {
-            lock::write_port(guard, port).expect("Failed to write TCP listener port to portfile!");
+            lock::write_pid_port(guard, port).expect("Failed to write TCP listener port to portfile!");
         })
     }
 
