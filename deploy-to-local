@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-cp "./target/$1/yt-dlp-wrapper" "/home/$USER/.local/bin/yt-dlp-wrapper"
-echo "Copied ./target/$1/yt-dlp-wrapper to /home/$USER/.local/bin/yt-dlp-wrapper"
+cp "./target/${1:-debug}/yt-dlp-wrapper" "/home/$USER/.local/bin/yt-dlp-wrapper"
+echo "Copied ./target/${1:-debug}/yt-dlp-wrapper to /home/$USER/.local/bin/yt-dlp-wrapper"
 
 cp './yt-dlp-wrapper-submit-request' "/home/$USER/.local/bin/yt-dlp-wrapper-submit-request"
 echo "Copied ./yt-dlp-wrapper-submit-request to /home/$USER/.local/bin/yt-dlp-wrapper-submit-request"
