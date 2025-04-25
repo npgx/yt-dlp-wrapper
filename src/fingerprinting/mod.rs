@@ -56,7 +56,7 @@ impl<'lre> SelectionTreeLookupResultsEntry<'lre> {
                         .map(|recording| {
                             format!(
                                 "https://musicbrainz.org/recording/{}; Title: {}, Disambiguation: {}, Artists: {}",
-                                &self.entry.id,
+                                &recording.id,
                                 style(&recording.title).blue(),
                                 style(
                                     recording
