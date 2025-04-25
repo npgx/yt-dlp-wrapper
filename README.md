@@ -139,6 +139,7 @@ I may or may not implement:
 - Create a "queue" file on disk (configure through args)
     - Allow enqueued requests that haven't been handled to be saved to this file (to save progress)
     - Watch the file to allow external modifications
+- Configurable Autoselect parameters
 
 ## License
 
