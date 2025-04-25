@@ -87,10 +87,10 @@ where
 
     before_context_return(&result);
 
-    let return_to_daemon = move |message: &StyledObject<String>| {
+    let return_to_tty = move |message: &StyledObject<String>| {
         println!();
         println!("{}", style(separator).yellow());
-        println!("Returned to daemon context.");
+        println!("Returned to tty context.");
         println!("{}", message);
         println!("{}", style(separator).yellow());
         println!();
@@ -99,21 +99,21 @@ where
     if exit_status.success() {
         let code = exit_status.code().unwrap();
         let message = style(format!("Command returned exit code {}.", code)).green();
-        return_to_daemon(&message);
+        return_to_tty(&message);
 
         handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
 
         Ok(ChildCommandExecution::Success(result))
     } else if let Some(err_code) = exit_status.code() {
         let message = style(format!("Command returned exit code {}.", err_code)).red();
-        return_to_daemon(&message);
+        return_to_tty(&message);
 
         handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
 
         Ok(ChildCommandExecution::NonZeroExitStatus(exit_status, result))
     } else {
         let message = style("Command was terminated by signal.".to_string()).red();
-        return_to_daemon(&message);
+        return_to_tty(&message);
 
         handle_ctrlc!(restart: { return Ok(ChildCommandExecution::Wtd(WhatToDo::RestartRequest)) }, abort: { return Ok(ChildCommandExecution::Wtd(WhatToDo::AbortRequest)) });
 

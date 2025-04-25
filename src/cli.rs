@@ -11,11 +11,12 @@ pub(crate) struct CliArgs {
     pub(crate) command: Command,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(clap::Subcommand, Debug)]
 pub(crate) enum Command {
     #[command(about = "Start the tty session that will handle the video requests")]
     Tty(TtyArgs),
-    #[command(about = "Send a video request to the daemon")]
+    #[command(about = "Send a video request to the tty instance")]
     Request(RequestArgs),
 }
 
@@ -80,7 +81,7 @@ mod request_about {
     pub(super) const YT_URL: &str = "Youtube url to use for creating the video request. Supports the majority of modern youtube urls (will extract the ID).";
 
     pub(super) const PORT_OVERRIDE: &str =
-        "Manually specify the tty/daemon's instance http port instead of reading from the lockfile.";
+        "Manually specify the tty instance's http port instead of reading from the lockfile.";
 
     pub(super) const LOCK_OVERRIDE: &str = "ONLY ENABLE THIS IF YOU KNOW WHAT YOU ARE DOING. Usually request instances will try to tell if the tty instance is running though the lockfile's ownership. This disables that. If this option is active, you NEED to specify a port manually.";
 }

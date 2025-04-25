@@ -33,10 +33,8 @@ I _might_ test it in the future.
 
 ## But how do I use it?
 
-That's more interesting.
-
 This project is separated into two logical parts.
-The [tty](#tty-instance) (or `daemon`) instance and the [request](#request-instance) instances.
+The [tty](#tty-instance) instance and the [request](#request-instance) instances.
 
 There can only be one `tty` instance (unless you explicitly disable the lockfile).
 Its job is to sit in your terminal, ready to receive "Video Requests" from `request` instances,
@@ -49,7 +47,7 @@ Once it does, it will begin the yt-dlp → fingerprint → beet process (sequent
 Quite a bit of things can be configured, run `yt-dlp-wrapper tty --help` and `yt-dlp-wrapper request --help` for more
 information.
 
-## Why two parts?
+### Why two parts?
 
 The main reason for _not_ just asking for the url in the terminal is to allow for a keybind to be pressed
 from any window.

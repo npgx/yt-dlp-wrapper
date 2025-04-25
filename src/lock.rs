@@ -117,7 +117,7 @@ impl InstanceLock {
             lock,
             guard_builder: |lock: &mut fd_lock::RwLock<File>| {
                 lock.try_write()
-                    .expect("Failed to acquire lock guard, is another daemon instance already running?")
+                    .expect("Failed to acquire lock guard, is another tty instance already running?")
             },
         }
         .build()

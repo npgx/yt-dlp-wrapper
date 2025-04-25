@@ -63,7 +63,7 @@ pub(crate) async fn run(args: Arc<cli::TtyArgs>) {
 
     println!(
         "{} Listening on 127.0.0.1:{}",
-        style("Daemon is running!").green(),
+        style("TTY instance is running!").green(),
         port
     );
 
