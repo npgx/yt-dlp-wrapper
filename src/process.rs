@@ -44,16 +44,16 @@ impl<T> ChildCommandExecution<T> {
     }
 }
 
-pub(crate) async fn handle_child_command_execution<T, Ex, FT, FTErr>(
+pub(crate) async fn handle_child_command_execution<Ret, RetFut, RetFutErr>(
     full_command: &[impl AsRef<str>],
     work_dir: &Path,
-    user_settings: impl FnOnce(tokio::process::Command) -> tokio::process::Command,
-    extract: Ex,
-) -> Result<ChildCommandExecution<T>, anyhow::Error>
+    user_settings: impl FnOnce(&mut tokio::process::Command),
+    before_context_return: impl FnOnce(&Ret),
+    extract: impl FnOnce(tokio::process::Child) -> RetFut,
+) -> Result<ChildCommandExecution<Ret>, anyhow::Error>
 where
-    Ex: FnOnce(tokio::process::Child) -> FT,
-    FT: Future<Output = Result<(std::process::ExitStatus, T), FTErr>>,
-    FTErr: std::error::Error + Send + Sync + 'static,
+    RetFut: Future<Output = Result<(std::process::ExitStatus, Ret), RetFutErr>> + Send,
+    RetFutErr: std::error::Error + Send + Sync + 'static,
 {
     let full_command = full_command.iter().map(AsRef::as_ref).collect::<Vec<_>>();
 
@@ -80,9 +80,12 @@ where
     let mut command = tokio::process::Command::new(full_command[0]);
     command.args(&full_command[1..]);
     command.current_dir(work_dir);
-    let mut command = user_settings(command);
+    user_settings(&mut command);
+
     let child = command.spawn()?;
     let (exit_status, result) = extract(child).await?;
+
+    before_context_return(&result);
 
     let return_to_daemon = move |message: &StyledObject<String>| {
         println!();

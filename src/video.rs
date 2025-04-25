@@ -117,15 +117,20 @@ pub(crate) async fn process_video_request(
         ytdlp_cmd.push(&request.youtube_id);
 
         'last_command: loop {
-            let yt_dlp_command_execution =
-                process::handle_child_command_execution(&ytdlp_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
-                    .await?
-                    .into_success_or_ask_wtd(|status, _unit| {
-                        let message = format!("yt-dlp returned a non-zero exit code: {}", status);
+            let yt_dlp_command_execution = process::handle_child_command_execution(
+                &ytdlp_cmd,
+                work_dir_path,
+                |_| (),
+                |_| (),
+                process::wait_for_child,
+            )
+            .await?
+            .into_success_or_ask_wtd(|status, _unit| {
+                let message = format!("yt-dlp returned a non-zero exit code: {}", status);
 
-                        (style(message).red(), WhatToDo::all())
-                    })
-                    .await?;
+                (style(message).red(), WhatToDo::all())
+            })
+            .await?;
 
             match yt_dlp_command_execution {
                 Ok(_unit) => {
@@ -154,14 +159,19 @@ pub(crate) async fn process_video_request(
         beet_cmd.push(".");
 
         'last_command: loop {
-            let beet_command_execution =
-                process::handle_child_command_execution(&beet_cmd, work_dir_path, |cmd| cmd, process::wait_for_child)
-                    .await?
-                    .into_success_or_ask_wtd(|status, _unit| {
-                        let message = format!("beet returned a non-zero exit code: {}", status);
-                        (style(message).red(), WhatToDo::all())
-                    })
-                    .await?;
+            let beet_command_execution = process::handle_child_command_execution(
+                &beet_cmd,
+                work_dir_path,
+                |_| (),
+                |_| (),
+                process::wait_for_child,
+            )
+            .await?
+            .into_success_or_ask_wtd(|status, _unit| {
+                let message = format!("beet returned a non-zero exit code: {}", status);
+                (style(message).red(), WhatToDo::all())
+            })
+            .await?;
 
             match beet_command_execution {
                 Ok(_unit) => {

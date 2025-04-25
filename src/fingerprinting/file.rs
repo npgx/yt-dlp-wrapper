@@ -3,6 +3,7 @@ use crate::fingerprinting::acoustid::FingerprintSubmissionResult;
 use crate::user::{ask_what_to_do, WhatToDo};
 use crate::{cli, fingerprinting, handle_ctrlc, handle_what_to_do, process};
 use console::style;
+use std::io::Write;
 use std::path::Path;
 
 pub(crate) fn get_fingerprintable_filenames_in_directory(path: &Path) -> Vec<String> {
@@ -105,7 +106,7 @@ pub(crate) async fn handle_fingerprinting_process_for_filepath(
                     )),
                     WhatToDo::all(),
                 )
-                .await?;
+                    .await?;
 
                 handle_what_to_do!(what_to_do, [
                     retry: { continue 'lookup },
@@ -192,10 +193,17 @@ pub(crate) async fn fingerprint_filepath(
         let ffmpeg_command_execution = process::handle_child_command_execution(
             &fpcalc_cmd,
             path.parent().unwrap(),
-            |mut cmd| {
+            move |cmd| {
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
-                cmd
+            },
+            |output| {
+                match std::io::stdout().write_all(&output.stdout) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        eprintln!("Failed to print to stdout: {}", err);
+                    }
+                };
             },
             process::wait_for_child_output,
         )

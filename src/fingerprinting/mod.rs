@@ -10,28 +10,28 @@ use std::sync::Arc;
 
 struct SelectionTreeLookupResultsEntry<'lre> {
     entry: &'lre LookupResultsEntry,
-    _recording_data: tokio::sync::OnceCell<Vec<Arc<musicbrainz_rs::entity::recording::Recording>>>,
+    recording_data: tokio::sync::OnceCell<Vec<Arc<musicbrainz_rs::entity::recording::Recording>>>,
     entry_display: String,
-    _recording_display: tokio::sync::OnceCell<Arc<Vec<String>>>,
+    recording_display: tokio::sync::OnceCell<Arc<Vec<String>>>,
 }
 
 impl<'lre> SelectionTreeLookupResultsEntry<'lre> {
     fn new(entry: &'lre LookupResultsEntry) -> Self {
         Self {
-            _recording_data: tokio::sync::OnceCell::new(),
+            recording_data: tokio::sync::OnceCell::new(),
             entry_display: format!(
                 "Score: {}, AcoustID: {}, Recordings: {}",
                 style(&entry.score).cyan().bold(),
                 &entry.id,
                 style(entry.recordings.as_ref().unwrap().len()).cyan()
             ),
-            _recording_display: tokio::sync::OnceCell::new(),
+            recording_display: tokio::sync::OnceCell::new(),
             entry,
         }
     }
 
     pub(crate) async fn recording_data(&self) -> &Vec<Arc<musicbrainz_rs::entity::recording::Recording>> {
-        self._recording_data
+        self.recording_data
             .get_or_init(|| async {
                 match self.entry.recordings.as_ref() {
                     Some(vec) => {
@@ -47,7 +47,7 @@ impl<'lre> SelectionTreeLookupResultsEntry<'lre> {
     }
 
     pub(crate) async fn recording_display(&self) -> Arc<Vec<String>> {
-        self._recording_display
+        self.recording_display
             .get_or_init(|| async {
                 Arc::new(
                     self.recording_data()

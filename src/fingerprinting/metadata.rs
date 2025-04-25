@@ -43,15 +43,20 @@ pub(crate) async fn ffmpeg_modify_metadata_to_match_recording(
     ];
 
     'last_command: loop {
-        let ffmpeg_command_execution =
-            process::handle_child_command_execution(&ffmpeg_cmd, movedir.path(), |cmd| cmd, process::wait_for_child)
-                .await?
-                .into_success_or_ask_wtd(|status, _unit| {
-                    let message = format!("ffmpeg returned a non-zero exit code: {}", status);
+        let ffmpeg_command_execution = process::handle_child_command_execution(
+            &ffmpeg_cmd,
+            movedir.path(),
+            |_| (),
+            |_| (),
+            process::wait_for_child,
+        )
+        .await?
+        .into_success_or_ask_wtd(|status, _unit| {
+            let message = format!("ffmpeg returned a non-zero exit code: {}", status);
 
-                    (style(message).red(), WhatToDo::all())
-                })
-                .await?;
+            (style(message).red(), WhatToDo::all())
+        })
+        .await?;
 
         match ffmpeg_command_execution {
             Ok(_unit) => {
