@@ -55,14 +55,14 @@ That way, you can copy/enqueue videos in batches instead of switching from one w
 
 ## TTY Instance
 
-The `tty` instance _can_ run without any additional parameters, but I recommend setting up `yt-dlp`'s parameters in
-advance through `--yt-dlp-args`.
+The `tty` instance _can_ run without any additional parameters, but I recommend setting up `yt-dlp`'s
+parameters through `--yt-dlp-args`.
 
 NOTE: I had `yt-dlp` in mind when making this project, but as long as the program you want to use can be invoked as
 `<the-executable> <the-args> -- <video-id>`, and downloads the audio/video files
 in the current working directory, which will be set to a random `/tmp` dir for the whole process, **it should work**.
 
-The `tty` instance will split the args string using [shlex](https://crates.io/crates/shlex), which means you can
+The `tty` instance **will split** the args string using [shlex](https://crates.io/crates/shlex), which means you can
 safely pass multiple space-separated arguments in the `*-args` parameters like so:
 
 ```shell
@@ -96,13 +96,13 @@ When a Video Request is received, the program will:
 
 ### Fingerprint submission
 
-Submitting a fingerprint through this project requires an AcoustID User API KEY (you get one when you create an
-account),
+Submitting a fingerprint through this project requires an AcoustID User API KEY
+(you get one when you create an account),
 and a musicbrainz RECORDING id.
 While technically you don't need a musicbrainz id for a pure fingerprint submission,
 this program is supposed to help with beets, which works off musicbrainz.
 
-Which means that if there is no musicbrainz recording matching the audio track
+This means that, if there is no musicbrainz recording matching the audio track
 you want to fingerprint, _you'll have to create one_.
 
 Other than that, the program will also query the AcoustID server to let you know if your submission went well.
@@ -127,7 +127,18 @@ instance.
 
 You're welcome to open an issue or a PR!
 
+**NOTE:** if the feature you wanted to implement through a PR is in the [Future features](#future-features) section,
+_please_ open an issue first, as I might already be working on it.
+
 But do note that this is just a little project I made for fun (and laziness).
+
+## Future features
+
+I may or may not implement:
+
+- Create a "queue" file on disk (configure through args)
+    - Allow enqueued requests that haven't been handled to be saved to this file (to save progress)
+    - Watch the file to allow external modifications
 
 ## License
 
